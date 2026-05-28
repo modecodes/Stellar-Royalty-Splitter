@@ -221,6 +221,12 @@ td:last-child {
   color: var(--accent-primary);
 }
 
+.copy-btn.copied,
+.copy-btn-sm.copied {
+  border-color: var(--success-color, #22c55e);
+  color: var(--success-color, #22c55e);
+}
+
 .wallet-row {
   display: flex;
   justify-content: space-between;
