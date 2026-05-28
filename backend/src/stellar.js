@@ -14,6 +14,7 @@ import {
   Account,
   xdr,
 } from "@stellar/stellar-sdk";
+import logger from "./logger.js";
 
 const RPC_URL =
   process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org";
@@ -43,33 +44,58 @@ export async function buildTx(callerAddress, contractId, method, args = []) {
   return prepared.toXDR();
 }
 
+function isRateLimitError(error) {
+  return (
+    error?.response?.status === 429 ||
+    error?.status === 429 ||
+    error?.message?.includes("429") ||
+    error?.message?.toLowerCase().includes("too many requests") ||
+    error?.message?.toLowerCase().includes("rate limit")
+  );
+}
+
 /**
- * Retry wrapper for buildTx with friendly error handling.
+ * Retry wrapper for buildTx with exponential backoff.
+ * Handles HTTP 429 rate-limit responses from Horizon explicitly.
  */
 export async function retryBuildTx(callerAddress, contractId, method, args = []) {
   const maxRetries = 3;
-  const backoffMs = 1000;
+  const baseBackoffMs = 1000;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await buildTx(callerAddress, contractId, method, args);
     } catch (error) {
       const isLastAttempt = attempt === maxRetries;
-      const isNetworkError = error.message?.includes('network') || error.message?.includes('timeout') || error.code === 'ENOTFOUND';
-      const isAccountNotFound = error.message?.includes('account not found');
-      const isSimulationError = error.message?.includes('simulation') || error.message?.includes('prepare');
+      const isNetworkError = error.message?.includes("network") || error.message?.includes("timeout") || error.code === "ENOTFOUND";
+      const isAccountNotFound = error.message?.includes("account not found");
+      const isSimulationError = error.message?.includes("simulation") || error.message?.includes("prepare");
+      const isRateLimit = isRateLimitError(error);
 
       if (isAccountNotFound) {
         throw { status: 400, message: "Caller account not found on Stellar network" };
       }
+
+      if (isRateLimit) {
+        if (isLastAttempt) {
+          logger.warn("Horizon rate limit exceeded after max retries", { method, contractId, attempt });
+          throw { status: 429, message: "Stellar Horizon rate limit exceeded. Please try again later." };
+        }
+        const delay = baseBackoffMs * Math.pow(2, attempt - 1);
+        logger.warn(`Horizon rate limit hit, retrying with backoff`, { method, contractId, attempt, maxRetries, delayMs: delay });
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+
       if (isNetworkError || isSimulationError) {
         if (isLastAttempt) {
           throw { status: 503, message: "Stellar RPC is currently unavailable. Please try again later." };
         }
-        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        const delay = baseBackoffMs * Math.pow(2, attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
         continue;
       }
-      // Re-throw other errors as-is
+
       throw error;
     }
   }

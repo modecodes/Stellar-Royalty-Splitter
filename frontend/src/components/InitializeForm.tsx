@@ -58,6 +58,18 @@ export default function InitializeForm({
         rowErrors[i] = rest;
       }
     }
+    if (field === "basisPoints") {
+      const num = parseFloat(value);
+      if (value !== "" && (isNaN(num) || num < 0 || num > 100)) {
+        rowErrors[i] = {
+          ...rowErrors[i],
+          basisPoints: "Percentage must be between 0 and 100",
+        };
+      } else {
+        const { basisPoints: _, ...rest } = rowErrors[i] ?? {};
+        rowErrors[i] = rest;
+      }
+    }
     setErrors(rowErrors);
   }
 
@@ -83,7 +95,7 @@ export default function InitializeForm({
   }
 
   const total = collaborators.reduce(
-    (sum: number, c: Collaborator) => sum + (parseInt(c.basisPoints) || 0),
+    (sum: number, c: Collaborator) => sum + (parseFloat(c.basisPoints) || 0),
     0,
   );
 
@@ -93,8 +105,8 @@ export default function InitializeForm({
   async function submit() {
     if (!contractId)
       return setStatus("error", "Enter a contract ID first.");
-    if (total !== 10_000)
-      return setStatus("error", `Shares must sum to 10,000 bp (currently ${total}).`);
+    if (Math.round(total * 100) !== 10_000)
+      return setStatus("error", `Percentages must sum to 100% (currently ${total.toFixed(2)}%).`);
 
     const addresses = collaborators.map((c: Collaborator) => c.address);
     const hasDuplicates = new Set(addresses).size !== addresses.length;
@@ -110,7 +122,7 @@ export default function InitializeForm({
         contractId,
         walletAddress,
         collaborators: addresses,
-        shares: collaborators.map((c: Collaborator) => parseInt(c.basisPoints)),
+        shares: collaborators.map((c: Collaborator) => Math.round(parseFloat(c.basisPoints) * 100)),
       });
 
       setStatus("info", "Signing transaction with Freighter...");
@@ -157,16 +169,26 @@ export default function InitializeForm({
                 <span className="field-error">{errors[i].address}</span>
               )}
             </div>
-            <input
-              placeholder="Basis pts"
-              type="number"
-              min={1}
-              max={10000}
-              value={c.basisPoints}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => update(i, "basisPoints", e.target.value)}
-              onBlur={(e: React.FocusEvent<HTMLInputElement>) => handleBlur(i, "basisPoints", e.target.value)}
-              style={{ flex: 1 }}
-            />
+            <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+              <input
+                placeholder="% (0–100)"
+                type="number"
+                min={0}
+                max={100}
+                step="any"
+                value={c.basisPoints}
+                aria-label={`Royalty percentage for collaborator ${i + 1}`}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                  update(i, "basisPoints", e.target.value);
+                  validateRow(i, "basisPoints", e.target.value);
+                }}
+                onBlur={(e: React.FocusEvent<HTMLInputElement>) => handleBlur(i, "basisPoints", e.target.value)}
+                style={{ marginBottom: errors[i]?.basisPoints ? "0.25rem" : undefined }}
+              />
+              {errors[i]?.basisPoints && (
+                <span className="field-error">{errors[i].basisPoints}</span>
+              )}
+            </div>
             {collaborators.length > 1 && (
               <button className="btn-danger" onClick={() => removeRow(i)}>
                 ✕
@@ -176,8 +198,8 @@ export default function InitializeForm({
         </div>
       ))}
 
-      <div className={`share-total ${total === 10_000 ? "share-total--valid" : "share-total--invalid"}`}>
-        Total: {total} / 10,000 bp ({(total / 100).toFixed(2)}%)
+      <div className={`share-total ${Math.round(total * 100) === 10_000 ? "share-total--valid" : "share-total--invalid"}`}>
+        Total: {total.toFixed(2)}% / 100%
       </div>
 
       {collaborators.length >= MAX_COLLABORATORS - 5 && collaborators.length < MAX_COLLABORATORS && (

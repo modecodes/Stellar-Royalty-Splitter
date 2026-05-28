@@ -6,6 +6,13 @@ use soroban_sdk::{
 
 #[contracttype]
 #[derive(Clone)]
+pub struct Recipient {
+    pub address: Address,
+    pub share: u32,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub enum DataKey {
     Admin,
     ShareMap,
@@ -104,6 +111,11 @@ impl RoyaltySplitter {
 
         let version = String::from_str(&env, env!("CARGO_PKG_VERSION"));
         env.storage().instance().set(&DataKey::ContractVersion, &version);
+
+        env.events().publish(
+            (symbol_short!("royalty"), symbol_short!("init")),
+            (collaborators, shares),
+        );
     }
 
     /// Set the secondary royalty rate for resales.
@@ -478,6 +490,34 @@ impl RoyaltySplitter {
     pub fn get_royalty_rate(env: Env) -> u32 {
         env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
         env.storage().instance().get(&DataKey::RoyaltyRate).unwrap_or(0)
+    }
+
+    /// Returns all recipients as an ordered list of (address, share) pairs.
+    ///
+    /// Each entry contains the collaborator's address and their basis-point share.
+    /// Preserves the insertion order from `initialize`. Returns an empty vec if
+    /// called before initialization.
+    pub fn get_recipients(env: Env) -> Vec<Recipient> {
+        env.storage().instance().extend_ttl(MIN_TTL, MAX_TTL);
+
+        let collaborators: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Collaborators)
+            .unwrap_or(Vec::new(&env));
+
+        let share_map: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ShareMap)
+            .unwrap_or(Map::new(&env));
+
+        let mut recipients: Vec<Recipient> = Vec::new(&env);
+        for addr in collaborators.iter() {
+            let share = share_map.get(addr.clone()).unwrap_or(0);
+            recipients.push_back(Recipient { address: addr, share });
+        }
+        recipients
     }
 
     /// Returns the contract's semantic version string (set from `CARGO_PKG_VERSION`
