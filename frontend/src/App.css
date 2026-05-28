@@ -61,6 +61,17 @@
   background-clip: text;
 }
 
+.contract-input-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.contract-input-row .contract-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .contract-input {
   width: 100%;
   padding: var(--spacing-sm);

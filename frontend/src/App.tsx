@@ -15,6 +15,7 @@ import RecordSecondarySale from "./components/RecordSecondarySale";
 import DistributeSecondaryRoyalties from "./components/DistributeSecondaryRoyalties";
 import ResaleHistory from "./components/ResaleHistory";
 import { Skeleton } from "./components/Skeleton";
+import { CopyButton } from "./components/CopyButton";
 import { api } from "./api";
 
 
@@ -277,13 +278,18 @@ export default function App() {
 
           <div className="sidebar-card">
             <h3>📋 Contract ID</h3>
-            <input
-              ref={contractInputRef}
-              className={`contract-input${contractIdError ? " contract-input--error" : ""}`}
-              placeholder="C..."
-              value={contractId}
-              onChange={(e) => handleContractChange(e.target.value)}
-            />
+            <div className="contract-input-row">
+              <input
+                ref={contractInputRef}
+                className={`contract-input${contractIdError ? " contract-input--error" : ""}`}
+                placeholder="C..."
+                value={contractId}
+                onChange={(e) => handleContractChange(e.target.value)}
+              />
+              {contractIdValid && (
+                <CopyButton value={contractId} label="contract ID" size="sm" />
+              )}
+            </div>
             {contractIdError && (
               <p className="contract-input-error">{contractIdError}</p>
             )}
