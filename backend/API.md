@@ -123,6 +123,93 @@ See route module `src/routes/secondary-royalty.js` for pool, sales, and distribu
 - `GET /api/v1/history/:contractId`
 - `GET /api/v1/analytics/:contractId`
 
+## Transaction confirmation
+
+### `POST /api/v1/transaction/confirm/:txHash`
+
+Poll Horizon until the transaction is confirmed in a ledger (#297), update the database, and fire distribute-completion webhooks (#295).
+
+**Body (optional):**
+
+```json
+{
+  "transactionId": 42,
+  "blockTime": "2026-05-31T12:00:00.000Z",
+  "errorMessage": null
+}
+```
+
+| Field | Description |
+| ----- | ----------- |
+| `transactionId` | Links the on-chain hash to a pending row created by `/distribute` when the DB row has no `txHash` yet |
+| `blockTime` | Optional ISO timestamp; defaults to Horizon `created_at` when omitted |
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "status": "confirmed",
+  "ledger": 123456,
+  "message": "Transaction abc12345... marked as confirmed"
+}
+```
+
+| Status | Meaning |
+| ------ | ------- |
+| `200` | Transaction confirmed (or failed) on-chain and DB updated |
+| `400` | Invalid hash or `transactionId` |
+| `404` | Transaction not found |
+| `409` | Transaction already settled or hash mismatch |
+| `504` | Horizon polling timed out (`TRANSACTION_POLL_TIMEOUT_MS`) |
+
+When a distribute transaction is confirmed, registered webhooks receive a POST payload (see Webhooks below).
+
+## Webhooks
+
+Operators can register HTTPS webhook URLs that receive a POST payload when a distribute transaction is confirmed on-chain (#295).
+
+### `POST /api/v1/webhooks/:contractId`
+
+Register a webhook URL.
+
+**Body:** `{ "url": "https://example.com/webhooks/distribute" }`
+
+**Response:** `{ "success": true, "webhookId": 1, "url": "...", "message": "Webhook registered" }`
+
+### `GET /api/v1/webhooks/:contractId`
+
+List active webhooks for a contract.
+
+**Response:** `{ "success": true, "data": [{ "id": 1, "contractId": "C...", "url": "...", "enabled": 1, "createdAt": "..." }] }`
+
+### `DELETE /api/v1/webhooks/:contractId/:webhookId`
+
+Disable a registered webhook.
+
+**Response:** `{ "success": true, "message": "Webhook removed" }`
+
+### Webhook payload
+
+When a distribute transaction is confirmed, each registered webhook receives:
+
+```json
+{
+  "event": "distribute.confirmed",
+  "transactionHash": "abc...",
+  "contractId": "C...",
+  "tokenId": "C...",
+  "requestedAmount": "1000",
+  "status": "confirmed",
+  "recipients": [
+    { "address": "G...", "amount": "500" }
+  ],
+  "timestamp": "2026-05-31T12:00:00.000Z"
+}
+```
+
+Failed deliveries are retried with exponential backoff (`WEBHOOK_MAX_RETRIES`, default 3).
+
 ## Operational configuration
 
 The Soroban RPC and Horizon clients are configurable via the following
@@ -137,6 +224,11 @@ environment variables:
 | `HORIZON_TIMEOUT_MS` | `10000` | Per-call timeout for Horizon (fee fetch + health probe). |
 | `HORIZON_FEE_CACHE_MS` | `30000` | How long the recommended fee (#274) is cached before re-fetching. |
 | `HEALTH_CHECK_TIMEOUT_MS` | `5000` | Timeout for the `/health` Horizon connectivity probe. |
+| `TRANSACTION_POLL_TIMEOUT_MS` | `60000` | Max time to poll Horizon for transaction confirmation (#297). |
+| `TRANSACTION_POLL_INTERVAL_MS` | `2000` | Delay between Horizon poll attempts (#297). |
+| `WEBHOOK_MAX_RETRIES` | `3` | Max delivery attempts per webhook (#295). |
+| `WEBHOOK_RETRY_BASE_MS` | `1000` | Base backoff for webhook retries (#295). |
+| `WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout for webhook POST calls (#295). |
 
 When the fee fetch fails the backend falls back to `BASE_FEE` (`100` stroops) so transaction submission keeps working.
 

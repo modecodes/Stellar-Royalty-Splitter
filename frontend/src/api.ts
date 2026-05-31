@@ -149,6 +149,7 @@ export const api = {
       status: "pending" | "confirmed" | "failed";
       blockTime?: string;
       errorMessage?: string;
+      transactionId?: number;
     },
   ) =>
     post<{ success: boolean; message: string }>(

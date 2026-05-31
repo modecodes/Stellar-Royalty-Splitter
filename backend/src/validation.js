@@ -53,6 +53,22 @@ export const distributeSecondarySchema = z.object({
   tokenId: contractAddress,
 });
 
+export const webhookRegisterSchema = z.object({
+  url: z
+    .string()
+    .url("Invalid webhook URL")
+    .refine((value) => value.startsWith("https://"), {
+      message: "Webhook URL must use HTTPS",
+    }),
+});
+
+export const transactionConfirmSchema = z.object({
+  transactionId: z.number().int().positive().optional(),
+  blockTime: z.string().optional(),
+  errorMessage: z.string().optional(),
+  status: z.enum(["pending", "confirmed", "failed"]).optional(),
+});
+
 export function validate(schema) {
   return (req, res, next) => {
     const result = schema.safeParse(req.body);
