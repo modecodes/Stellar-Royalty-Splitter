@@ -14,13 +14,27 @@ pub struct Recipient {
     pub share: u32,
 }
 
-/// Typed instance storage keys (Soroban best practice — no bare string keys).
+/// One entry in the royalty rate change history (#323).
+#[contracttype]
+#[derive(Clone)]
+pub struct RoyaltyRateChange {
+    pub old_rate: u32,
+    pub new_rate: u32,
+    pub timestamp: u64,
+    pub caller: Address,
+}
+
+/// Typed storage keys.
+///
+/// Instance storage keys: small, frequently accessed values (Admin, Paused, etc.).
+/// Persistent storage keys: large or infrequently accessed values (Collaborators,
+/// ShareMap, DefaultRecipients) — stored separately to avoid bloating the instance
+/// entry and unnecessarily increasing ledger fees.
 #[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
+    // Instance storage
     Admin,
-    ShareMap,
-    Collaborators,
     SecondaryPool,
     SecondaryToken,
     ContractVersion,
@@ -28,9 +42,20 @@ pub enum StorageKey {
     LastDistribution,
     LastSecondaryDistribution,
     Paused,
-    DefaultRecipients,
     DistributeHistory,
+    PendingAdmin,
+    AdminList,
+    AdminThreshold,
+    // Persistent storage
+    Collaborators,
+    ShareMap,
+    DefaultRecipients,
+    RoyaltyRateHistory,
 }
+
+/// Maximum number of rate-change entries kept in history.
+/// Older entries are dropped when the cap is reached.
+pub const RATE_HISTORY_CAP: u32 = 20;
 
 /// Backward-compatible alias for integration tests and external references.
 pub type DataKey = StorageKey;
@@ -200,8 +225,9 @@ impl RoyaltySplitter {
         let admin = collaborators.get(0).unwrap();
 
         storage::instance_set(&env, &StorageKey::Admin, &admin);
-        storage::instance_set(&env, &StorageKey::Collaborators, &collaborators);
-        storage::instance_set(&env, &StorageKey::ShareMap, &share_map);
+        // Collaborators and ShareMap go to persistent storage (#322)
+        storage::persistent_set(&env, &StorageKey::Collaborators, &collaborators);
+        storage::persistent_set(&env, &StorageKey::ShareMap, &share_map);
 
         let version = String::from_str(&env, VERSION);
         storage::instance_set(&env, &StorageKey::ContractVersion, &version);
@@ -227,9 +253,7 @@ impl RoyaltySplitter {
     pub fn set_royalty_rate(env: Env, new_rate: u32) {
         storage::extend_instance_ttl(&env);
 
-        let admin = Self::require_admin_address(&env);
-
-        auth::require_admin(&env, &admin, auth::msg::SET_ROYALTY_RATE_ADMIN);
+        Self::check_admin_auth(&env, auth::msg::SET_ROYALTY_RATE_ADMIN);
 
         if new_rate == 0 {
             Self::fail(&env, ContractError::RoyaltyRateZero);
@@ -239,12 +263,63 @@ impl RoyaltySplitter {
             Self::fail(&env, ContractError::RoyaltyRateTooHigh);
         }
 
+        // Read old rate before overwriting — 0 means never set.
+        let old_rate: u32 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::RoyaltyRate)
+            .unwrap_or(0);
+
         storage::instance_set(&env, &StorageKey::RoyaltyRate, &new_rate);
+
+        // Append to capped history in persistent storage (#323).
+        // Gas note: one persistent read + write per call; capped at RATE_HISTORY_CAP
+        // entries (~20 × ~80 bytes) so storage growth is bounded.
+        let caller: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("contract not initialized");
+
+        let mut history: Vec<RoyaltyRateChange> =
+            storage::persistent_get::<Vec<RoyaltyRateChange>>(&env, &StorageKey::RoyaltyRateHistory)
+                .unwrap_or(Vec::new(&env));
+
+        if history.len() >= RATE_HISTORY_CAP {
+            // Drop the oldest entry to keep the vec at the cap.
+            let mut trimmed: Vec<RoyaltyRateChange> = Vec::new(&env);
+            for i in 1..history.len() {
+                trimmed.push_back(history.get(i).unwrap());
+            }
+            history = trimmed;
+        }
+
+        history.push_back(RoyaltyRateChange {
+            old_rate,
+            new_rate,
+            timestamp: env.ledger().timestamp(),
+            caller,
+        });
+
+        storage::persistent_set(&env, &StorageKey::RoyaltyRateHistory, &history);
 
         env.events().publish(
             (symbol_short!("royalty"), symbol_short!("rate_set")),
             new_rate,
         );
+    }
+
+    /// Returns the on-chain history of royalty rate changes, oldest first.
+    ///
+    /// Each entry contains the old rate, new rate, block timestamp, and the
+    /// admin address that made the change. Capped at [`RATE_HISTORY_CAP`]
+    /// entries — once full, the oldest entry is dropped on each new change.
+    ///
+    /// Returns an empty vec if `set_royalty_rate` has never been called.
+    pub fn get_royalty_rate_history(env: Env) -> Vec<RoyaltyRateChange> {
+        storage::extend_instance_ttl(&env);
+        storage::persistent_get::<Vec<RoyaltyRateChange>>(&env, &StorageKey::RoyaltyRateHistory)
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Pause the contract — halts `distribute` and `distribute_secondary_royalties`.
@@ -260,13 +335,14 @@ impl RoyaltySplitter {
     pub fn pause(env: Env) {
         storage::extend_instance_ttl(&env);
 
-        let admin = Self::require_admin_address(&env);
-
-        auth::require_admin(&env, &admin, auth::msg::PAUSE_ADMIN);
+        Self::check_admin_auth(&env, auth::msg::PAUSE_ADMIN);
         storage::instance_set(&env, &StorageKey::Paused, &true);
     }
 
-    /// Transfer admin rights to a new address.
+    /// Transfer admin rights to a new address (single-admin mode only).
+    ///
+    /// Immediate single-step transfer — the new admin does NOT need to confirm.
+    /// Disabled when multi-sig is active; use `propose_admin_transfer` instead.
     ///
     /// # Arguments
     /// * `new_admin` - Address that will become the contract admin.
@@ -276,10 +352,20 @@ impl RoyaltySplitter {
     ///
     /// # Panics
     /// * `"contract not initialized"` — called before `initialize`
+    /// * `"use propose_admin_transfer when multi-sig is active"` — if AdminList is set
     pub fn admin_transfer(env: Env, new_admin: Address) {
         storage::extend_instance_ttl(&env);
 
-        let admin = Self::require_admin_address(&env);
+        // Block single-step transfer when multi-sig is configured (#321 + #320 safety)
+        if env.storage().instance().has(&StorageKey::AdminList) {
+            panic!("use propose_admin_transfer when multi-sig is active");
+        }
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("contract not initialized");
 
         auth::require_admin(&env, &admin, auth::msg::ADMIN_TRANSFER_ADMIN);
 
@@ -289,6 +375,64 @@ impl RoyaltySplitter {
         env.events().publish(
             (symbol_short!("royalty"), symbol_short!("admin_xfr")),
             (previous_admin, new_admin),
+        );
+    }
+
+    /// Propose a new admin — first step of the two-step admin transfer (#320).
+    ///
+    /// Stores `new_admin` as pending; the transfer is not complete until
+    /// `accept_admin` is called by `new_admin`.
+    ///
+    /// # Authorization
+    /// Requires current admin (or multi-sig threshold) signature.
+    pub fn propose_admin_transfer(env: Env, new_admin: Address) {
+        storage::extend_instance_ttl(&env);
+
+        Self::check_admin_auth(&env, auth::msg::PROPOSE_ADMIN_ADMIN);
+        storage::instance_set(&env, &StorageKey::PendingAdmin, &new_admin);
+
+        env.events().publish(
+            (symbol_short!("royalty"), symbol_short!("adm_prop")),
+            new_admin,
+        );
+    }
+
+    /// Accept a pending admin transfer — second step of the two-step flow (#320).
+    ///
+    /// Completes the transfer initiated by `propose_admin_transfer`. Only the
+    /// address nominated in `propose_admin_transfer` can call this.
+    ///
+    /// # Authorization
+    /// Requires signature from the *pending* admin (not the current admin).
+    ///
+    /// # Panics
+    /// * `"no pending admin transfer"` — called without a prior `propose_admin_transfer`
+    pub fn accept_admin(env: Env) {
+        storage::extend_instance_ttl(&env);
+
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::PendingAdmin)
+            .expect("no pending admin transfer");
+
+        // Only the pending (new) admin signs acceptance — not the current admin(s).
+        let context = String::from_str(&env, auth::msg::ACCEPT_ADMIN_PENDING);
+        env.events().publish((symbol_short!("auth_req"),), context);
+        pending.require_auth();
+
+        let previous_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("contract not initialized");
+
+        storage::instance_set(&env, &StorageKey::Admin, &pending);
+        env.storage().instance().remove(&StorageKey::PendingAdmin);
+
+        env.events().publish(
+            (symbol_short!("royalty"), symbol_short!("adm_acc")),
+            (previous_admin, pending),
         );
     }
 
@@ -302,9 +446,7 @@ impl RoyaltySplitter {
     pub fn unpause(env: Env) {
         storage::extend_instance_ttl(&env);
 
-        let admin = Self::require_admin_address(&env);
-
-        auth::require_admin(&env, &admin, auth::msg::UNPAUSE_ADMIN);
+        Self::check_admin_auth(&env, auth::msg::UNPAUSE_ADMIN);
         storage::instance_set(&env, &StorageKey::Paused, &false);
     }
 
@@ -325,9 +467,7 @@ impl RoyaltySplitter {
     pub fn update_wasm(env: Env, wasm_hash: BytesN<32>) {
         storage::extend_instance_ttl(&env);
 
-        let admin = Self::require_admin_address(&env);
-
-        auth::require_admin(&env, &admin, auth::msg::UPDATE_WASM_ADMIN);
+        Self::check_admin_auth(&env, auth::msg::UPDATE_WASM_ADMIN);
 
         env.deployer().update_current_contract_wasm(wasm_hash);
     }
@@ -382,12 +522,11 @@ impl RoyaltySplitter {
     pub fn set_default_recipients(env: Env, recipients: Vec<Recipient>) {
         storage::extend_instance_ttl(&env);
 
-        let admin = Self::require_admin_address(&env);
-
-        auth::require_admin(&env, &admin, auth::msg::SET_DEFAULT_RECIPIENTS_ADMIN);
+        Self::check_admin_auth(&env, auth::msg::SET_DEFAULT_RECIPIENTS_ADMIN);
         Self::validate_recipient_list(&env, &recipients);
 
-        storage::instance_set(&env, &StorageKey::DefaultRecipients, &recipients);
+        // DefaultRecipients uses persistent storage (#322)
+        storage::persistent_set(&env, &StorageKey::DefaultRecipients, &recipients);
 
         env.events().publish(
             (symbol_short!("default"), symbol_short!("rcpt_set")),
@@ -405,9 +544,7 @@ impl RoyaltySplitter {
     pub fn set_recipients(env: Env, recipients: Vec<Recipient>) {
         storage::extend_instance_ttl(&env);
 
-        let admin = Self::require_admin_address(&env);
-
-        auth::require_admin(&env, &admin, auth::msg::SET_RECIPIENTS_ADMIN);
+        Self::check_admin_auth(&env, auth::msg::SET_RECIPIENTS_ADMIN);
         Self::validate_recipient_list(&env, &recipients);
 
         let mut collaborators: Vec<Address> = Vec::new(&env);
@@ -419,8 +556,9 @@ impl RoyaltySplitter {
             share_map.set(recipient.address.clone(), recipient.share);
         }
 
-        storage::instance_set(&env, &StorageKey::Collaborators, &collaborators);
-        storage::instance_set(&env, &StorageKey::ShareMap, &share_map);
+        // Collaborators and ShareMap use persistent storage (#322)
+        storage::persistent_set(&env, &StorageKey::Collaborators, &collaborators);
+        storage::persistent_set(&env, &StorageKey::ShareMap, &share_map);
 
         env.events().publish(
             (symbol_short!("royalty"), symbol_short!("recip_set")),
@@ -440,7 +578,7 @@ impl RoyaltySplitter {
 
         let admin = Self::require_admin_address(&env);
 
-        auth::require_admin(&env, &admin, auth::msg::WITHDRAW_ADMIN);
+        Self::check_admin_auth(&env, auth::msg::WITHDRAW_ADMIN);
 
         if amount <= 0 {
             Self::fail(&env, ContractError::AmountNotPositive);
@@ -466,9 +604,8 @@ impl RoyaltySplitter {
     /// Safe to call before initialization or when no defaults are configured.
     pub fn get_default_recipients(env: Env) -> Vec<Recipient> {
         storage::extend_instance_ttl(&env);
-        env.storage()
-            .instance()
-            .get(&StorageKey::DefaultRecipients)
+        // DefaultRecipients uses persistent storage (#322)
+        storage::persistent_get::<Vec<Recipient>>(&env, &StorageKey::DefaultRecipients)
             .unwrap_or(Vec::new(&env))
     }
 
@@ -494,9 +631,7 @@ impl RoyaltySplitter {
     pub fn distribute_with_override(env: Env, token: Address, override_recipients: Vec<Recipient>) {
         storage::extend_instance_ttl(&env);
 
-        let admin = Self::require_admin_address(&env);
-
-        auth::require_admin(&env, &admin, auth::msg::DISTRIBUTE_OVERRIDE_ADMIN);
+        Self::check_admin_auth(&env, auth::msg::DISTRIBUTE_OVERRIDE_ADMIN);
 
         if env
             .storage()
@@ -512,19 +647,22 @@ impl RoyaltySplitter {
             // Use override recipients if provided
             override_recipients
         } else {
-            // Try to use default recipients, fall back to collaborators
-            let defaults: Vec<Recipient> = env
-                .storage()
-                .instance()
-                .get(&StorageKey::DefaultRecipients)
-                .unwrap_or(Vec::new(&env));
+            // Try to use default recipients (persistent storage), fall back to collaborators
+            let defaults: Vec<Recipient> =
+                storage::persistent_get::<Vec<Recipient>>(&env, &StorageKey::DefaultRecipients)
+                    .unwrap_or(Vec::new(&env));
 
             if !defaults.is_empty() {
                 defaults
             } else {
-                // Fall back to original collaborator list
-                let collaborators = Self::require_collaborators(&env);
-                let share_map = Self::require_share_map(&env);
+                // Fall back to original collaborator list (persistent storage)
+                let collaborators: Vec<Address> =
+                    storage::persistent_get::<Vec<Address>>(&env, &StorageKey::Collaborators)
+                        .expect("no collaborators");
+
+                let share_map: Map<Address, u32> =
+                    storage::persistent_get::<Map<Address, u32>>(&env, &StorageKey::ShareMap)
+                        .expect("no share map");
 
                 let mut recipients: Vec<Recipient> = Vec::new(&env);
                 for addr in collaborators.iter() {
@@ -715,9 +853,7 @@ impl RoyaltySplitter {
     pub fn distribute_secondary_royalties(env: Env) {
         storage::extend_instance_ttl(&env);
 
-        let admin = Self::require_admin_address(&env);
-
-        auth::require_admin(&env, &admin, auth::msg::DISTRIBUTE_SECONDARY_ADMIN);
+        Self::check_admin_auth(&env, auth::msg::DISTRIBUTE_SECONDARY_ADMIN);
 
         if env
             .storage()
@@ -755,8 +891,14 @@ impl RoyaltySplitter {
             Self::fail(&env, ContractError::PoolExceedsBalance);
         }
 
-        let collaborators = Self::require_collaborators(&env);
-        let share_map = Self::require_share_map(&env);
+        // Collaborators and ShareMap from persistent storage (#322)
+        let collaborators: Vec<Address> =
+            storage::persistent_get::<Vec<Address>>(&env, &StorageKey::Collaborators)
+                .expect("no collaborators");
+
+        let share_map: Map<Address, u32> =
+            storage::persistent_get::<Map<Address, u32>>(&env, &StorageKey::ShareMap)
+                .expect("no share map");
 
         let n = collaborators.len();
         let mut payouts: Vec<(Address, i128)> = Vec::new(&env);
@@ -847,17 +989,14 @@ impl RoyaltySplitter {
     pub fn get_recipients(env: Env) -> Vec<Recipient> {
         storage::extend_instance_ttl(&env);
 
-        let collaborators: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&StorageKey::Collaborators)
-            .unwrap_or(Vec::new(&env));
+        // Collaborators and ShareMap from persistent storage (#322)
+        let collaborators: Vec<Address> =
+            storage::persistent_get::<Vec<Address>>(&env, &StorageKey::Collaborators)
+                .unwrap_or(Vec::new(&env));
 
-        let share_map: Map<Address, u32> = env
-            .storage()
-            .instance()
-            .get(&StorageKey::ShareMap)
-            .unwrap_or(Map::new(&env));
+        let share_map: Map<Address, u32> =
+            storage::persistent_get::<Map<Address, u32>>(&env, &StorageKey::ShareMap)
+                .unwrap_or(Map::new(&env));
 
         let mut recipients: Vec<Recipient> = Vec::new(&env);
         for addr in collaborators.iter() {
@@ -893,7 +1032,10 @@ impl RoyaltySplitter {
     /// * `"collaborator not found"` — address is not a registered collaborator
     pub fn get_share(env: Env, collaborator: Address) -> u32 {
         storage::extend_instance_ttl(&env);
-        let share_map = Self::require_share_map(&env);
+        // ShareMap from persistent storage (#322)
+        let share_map: Map<Address, u32> =
+            storage::persistent_get::<Map<Address, u32>>(&env, &StorageKey::ShareMap)
+                .expect("contract not initialized");
 
         share_map
             .get(collaborator)
@@ -907,11 +1049,12 @@ impl RoyaltySplitter {
     pub fn update_share(env: Env, collaborator: Address, new_share: u32) {
         storage::extend_instance_ttl(&env);
 
-        let admin = Self::require_admin_address(&env);
+        Self::check_admin_auth(&env, auth::msg::UPDATE_SHARE_ADMIN);
 
-        auth::require_admin(&env, &admin, auth::msg::UPDATE_SHARE_ADMIN);
-
-        let mut share_map = Self::require_share_map(&env);
+        // ShareMap from persistent storage (#322)
+        let mut share_map: Map<Address, u32> =
+            storage::persistent_get::<Map<Address, u32>>(&env, &StorageKey::ShareMap)
+                .expect("contract not initialized");
 
         if !share_map.contains_key(collaborator.clone()) {
             Self::fail(&env, ContractError::CollaboratorNotFound);
@@ -933,7 +1076,7 @@ impl RoyaltySplitter {
         }
 
         share_map.set(collaborator.clone(), new_share);
-        storage::instance_set(&env, &StorageKey::ShareMap, &share_map);
+        storage::persistent_set(&env, &StorageKey::ShareMap, &share_map);
 
         env.events().publish(
             (symbol_short!("share"), symbol_short!("updated")),
@@ -949,11 +1092,10 @@ impl RoyaltySplitter {
     /// * `addr` - Address to check.
     pub fn is_collaborator(env: Env, addr: Address) -> bool {
         storage::extend_instance_ttl(&env);
-        let share_map: Map<Address, u32> = env
-            .storage()
-            .instance()
-            .get(&StorageKey::ShareMap)
-            .unwrap_or(Map::new(&env));
+        // ShareMap from persistent storage (#322)
+        let share_map: Map<Address, u32> =
+            storage::persistent_get::<Map<Address, u32>>(&env, &StorageKey::ShareMap)
+                .unwrap_or(Map::new(&env));
 
         share_map.contains_key(addr)
     }
@@ -962,11 +1104,10 @@ impl RoyaltySplitter {
     /// Returns 0 if called before initialization.
     pub fn collaborator_count(env: Env) -> u32 {
         storage::extend_instance_ttl(&env);
-        let collaborators: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&StorageKey::Collaborators)
-            .unwrap_or(Vec::new(&env));
+        // Collaborators from persistent storage (#322)
+        let collaborators: Vec<Address> =
+            storage::persistent_get::<Vec<Address>>(&env, &StorageKey::Collaborators)
+                .unwrap_or(Vec::new(&env));
         collaborators.len()
     }
 
@@ -974,18 +1115,16 @@ impl RoyaltySplitter {
     /// Returns an empty vec if called before initialization.
     pub fn get_collaborators(env: Env) -> Vec<Address> {
         storage::extend_instance_ttl(&env);
-        env.storage()
-            .instance()
-            .get(&StorageKey::Collaborators)
+        // Collaborators from persistent storage (#322)
+        storage::persistent_get::<Vec<Address>>(&env, &StorageKey::Collaborators)
             .unwrap_or(Vec::new(&env))
     }
 
     /// Returns the full share map (Address → basis points) in a single call.
     pub fn get_all_shares(env: Env) -> Map<Address, u32> {
         storage::extend_instance_ttl(&env);
-        env.storage()
-            .instance()
-            .get(&StorageKey::ShareMap)
+        // ShareMap from persistent storage (#322)
+        storage::persistent_get::<Map<Address, u32>>(&env, &StorageKey::ShareMap)
             .unwrap_or(Map::new(&env))
     }
 
@@ -1022,13 +1161,73 @@ impl RoyaltySplitter {
     /// * `"contract not initialized"` — called before `initialize`
     pub fn get_total_shares(env: Env) -> u32 {
         storage::extend_instance_ttl(&env);
-        let share_map = Self::require_share_map(&env);
+        // ShareMap from persistent storage (#322)
+        let share_map: Map<Address, u32> =
+            storage::persistent_get::<Map<Address, u32>>(&env, &StorageKey::ShareMap)
+                .expect("contract not initialized");
 
         let mut total = 0;
         for item in share_map.iter() {
             total = Self::checked_add_share_total(&env, total, item.1);
         }
         total
+    }
+
+    /// Configure a multi-sig admin list and signing threshold (#321).
+    ///
+    /// Once set, all sensitive functions require the first `threshold` addresses
+    /// in `admins` to authorize each call. The single-step `admin_transfer` is
+    /// disabled when this is active — use `propose_admin_transfer` instead.
+    ///
+    /// # Arguments
+    /// * `admins` - Ordered list of admin addresses (max 10).
+    /// * `threshold` - Number of admins that must sign (1 ≤ threshold ≤ admins.len()).
+    ///
+    /// # Authorization
+    /// Requires current admin (or multi-sig threshold) signature.
+    pub fn set_admins(env: Env, admins: Vec<Address>, threshold: u32) {
+        storage::extend_instance_ttl(&env);
+
+        Self::check_admin_auth(&env, auth::msg::SET_ADMINS_ADMIN);
+
+        if admins.is_empty() {
+            panic!("admin list cannot be empty");
+        }
+        if threshold < 1 {
+            panic!("threshold must be at least 1");
+        }
+        if threshold > admins.len() as u32 {
+            panic!("threshold cannot exceed admin count");
+        }
+
+        // Check for duplicate addresses
+        let mut seen: Vec<Address> = Vec::new(&env);
+        for i in 0..admins.len() {
+            let addr = admins.get(i).unwrap();
+            for j in 0..seen.len() {
+                if seen.get(j).unwrap() == addr {
+                    panic!("duplicate admin address");
+                }
+            }
+            seen.push_back(addr);
+        }
+
+        storage::instance_set(&env, &StorageKey::AdminList, &admins);
+        storage::instance_set(&env, &StorageKey::AdminThreshold, &threshold);
+
+        env.events().publish(
+            (symbol_short!("royalty"), symbol_short!("adms_set")),
+            (admins.len(), threshold),
+        );
+    }
+
+    /// Returns the configured multi-sig admin list, or an empty vec if not set.
+    pub fn get_admins(env: Env) -> Vec<Address> {
+        storage::extend_instance_ttl(&env);
+        env.storage()
+            .instance()
+            .get(&StorageKey::AdminList)
+            .unwrap_or(Vec::new(&env))
     }
 
     fn validate_recipient_list(env: &Env, recipients: &Vec<Recipient>) {
@@ -1063,5 +1262,36 @@ impl RoyaltySplitter {
         if total_shares != 10_000 {
             Self::fail(env, ContractError::InvalidShareTotal);
         }
+    }
+
+    /// Auth helper: requires current admin(s) to authorize.
+    ///
+    /// If `AdminList` is configured (multi-sig active), requires the first
+    /// `AdminThreshold` addresses in the list to call `require_auth()`.
+    /// Otherwise falls back to the single `Admin` address.
+    fn check_admin_auth(env: &Env, message: &str) {
+        let admin_list: Option<Vec<Address>> =
+            env.storage().instance().get(&StorageKey::AdminList);
+        if let Some(admins) = admin_list {
+            if !admins.is_empty() {
+                let threshold: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&StorageKey::AdminThreshold)
+                    .unwrap_or(1);
+                let context = String::from_str(env, message);
+                env.events().publish((symbol_short!("auth_req"),), context);
+                for i in 0..threshold {
+                    admins.get(i).unwrap().require_auth();
+                }
+                return;
+            }
+        }
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("contract not initialized");
+        auth::require_admin(env, &admin, message);
     }
 }

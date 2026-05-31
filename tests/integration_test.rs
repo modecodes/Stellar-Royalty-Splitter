@@ -6,7 +6,8 @@ use soroban_sdk::{
     vec, Address, BytesN, Env, IntoVal, Map, String, TryFromVal, Val, Vec as SorobanVec,
 };
 use stellar_royalty_splitter::{
-    auth, ContractError, DataKey, Recipient, RoyaltySplitterClient, StorageKey, MIN_TTL, VERSION,
+    auth, ContractError, DataKey, Recipient, RoyaltyRateChange, RoyaltySplitterClient, StorageKey,
+    MIN_TTL, RATE_HISTORY_CAP, VERSION,
 };
 
 fn setup(env: &Env) -> (Address, RoyaltySplitterClient) {
@@ -63,11 +64,12 @@ fn test_distribute_rejects_invalid_share_total() {
     mint(&env, &token, &contract_id, 1000);
 
     // Corrupt share map so totals are 60% instead of 100% (defense-in-depth path).
+    // ShareMap is in persistent storage after #322 migration.
     let mut bad_map: Map<Address, u32> = Map::new(&env);
     bad_map.set(admin.clone(), 3000);
     bad_map.set(b.clone(), 3000);
     env.as_contract(&contract_id, || {
-        env.storage().instance().set(&DataKey::ShareMap, &bad_map);
+        env.storage().persistent().set(&DataKey::ShareMap, &bad_map);
     });
 
     client.distribute(&token);
@@ -251,35 +253,37 @@ fn test_storage_snapshot_after_initialize() {
     );
 
     env.as_contract(&contract_id, || {
+        // Admin and ContractVersion remain in instance storage
         let stored_admin: Address = env
             .storage()
             .instance()
             .get(&StorageKey::Admin)
             .expect("admin should be stored");
-        let stored_collaborators: SorobanVec<Address> = env
-            .storage()
-            .instance()
-            .get(&StorageKey::Collaborators)
-            .expect("collaborators should be stored");
-        let stored_shares: Map<Address, u32> = env
-            .storage()
-            .instance()
-            .get(&StorageKey::ShareMap)
-            .expect("share map should be stored");
         let stored_version: String = env
             .storage()
             .instance()
             .get(&StorageKey::ContractVersion)
             .expect("contract version should be stored");
-
         assert_eq!(stored_admin, admin);
+        assert_eq!(stored_version, String::from_str(&env, VERSION));
+
+        // Collaborators and ShareMap are in persistent storage after #322 migration
+        let stored_collaborators: SorobanVec<Address> = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::Collaborators)
+            .expect("collaborators should be stored in persistent storage");
+        let stored_shares: Map<Address, u32> = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::ShareMap)
+            .expect("share map should be stored in persistent storage");
         assert_eq!(stored_collaborators.len(), 2);
         assert_eq!(stored_collaborators.get(0).unwrap(), admin);
         assert_eq!(stored_collaborators.get(1).unwrap(), collaborator);
         assert_eq!(stored_shares.len(), 2);
         assert_eq!(stored_shares.get(admin).unwrap(), 7000);
         assert_eq!(stored_shares.get(collaborator).unwrap(), 3000);
-        assert_eq!(stored_version, String::from_str(&env, VERSION));
 
         assert!(!env.storage().instance().has(&StorageKey::LastDistribution));
         assert!(!env.storage().instance().has(&StorageKey::DistributeHistory));
@@ -312,21 +316,33 @@ fn test_storage_snapshot_after_distribute() {
     client.distribute(&token);
 
     env.as_contract(&contract_id, || {
+        // Admin remains in instance storage
         let stored_admin: Address = env
             .storage()
             .instance()
             .get(&StorageKey::Admin)
             .expect("admin should remain stored");
+        assert_eq!(stored_admin, admin);
+
+        // Collaborators and ShareMap are in persistent storage after #322 migration
         let stored_collaborators: SorobanVec<Address> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&StorageKey::Collaborators)
-            .expect("collaborators should remain stored");
+            .expect("collaborators should remain stored in persistent storage");
         let stored_shares: Map<Address, u32> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&StorageKey::ShareMap)
-            .expect("share map should remain stored");
+            .expect("share map should remain stored in persistent storage");
+        assert_eq!(stored_collaborators.len(), 2);
+        assert_eq!(stored_collaborators.get(0).unwrap(), admin);
+        assert_eq!(stored_collaborators.get(1).unwrap(), collaborator);
+        assert_eq!(stored_shares.len(), 2);
+        assert_eq!(stored_shares.get(admin).unwrap(), 6000);
+        assert_eq!(stored_shares.get(collaborator).unwrap(), 4000);
+
+        // Instance storage still holds timestamps and counters
         let last_distribution: u64 = env
             .storage()
             .instance()
@@ -337,14 +353,6 @@ fn test_storage_snapshot_after_distribute() {
             .instance()
             .get(&StorageKey::DistributeHistory)
             .expect("distribute count should be stored");
-
-        assert_eq!(stored_admin, admin);
-        assert_eq!(stored_collaborators.len(), 2);
-        assert_eq!(stored_collaborators.get(0).unwrap(), admin);
-        assert_eq!(stored_collaborators.get(1).unwrap(), collaborator);
-        assert_eq!(stored_shares.len(), 2);
-        assert_eq!(stored_shares.get(admin).unwrap(), 6000);
-        assert_eq!(stored_shares.get(collaborator).unwrap(), 4000);
         assert_eq!(last_distribution, distribution_timestamp);
         assert_eq!(distribute_count, 1);
         assert!(!env.storage().instance().has(&StorageKey::SecondaryPool));
@@ -1259,10 +1267,11 @@ fn test_distribute_empty_recipients_panics() {
     );
     mint(&env, &token, &contract_id, 1000);
 
+    // Collaborators are in persistent storage after #322 migration
     let empty_collaborators: SorobanVec<Address> = vec![&env];
     env.as_contract(&contract_id, || {
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Collaborators, &empty_collaborators);
     });
 
@@ -2546,4 +2555,545 @@ fn test_distribute_zero_balance() {
     assert_eq!(TokenClient::new(&env, &token).balance(&b), 0);
     assert_eq!(client.get_distribute_count(), 0);
     assert_eq!(client.get_last_distribution(), None);
+}
+
+// ── Issue #322: Persistent storage migration ─────────────────────────────────
+
+#[test]
+fn test_collaborators_in_persistent_storage() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (contract_id, client) = setup(&env);
+
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, a.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    env.as_contract(&contract_id, || {
+        let collaborators: SorobanVec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Collaborators)
+            .expect("collaborators must be in persistent storage");
+        assert_eq!(collaborators.len(), 2);
+        // Must NOT be in instance storage
+        assert!(!env.storage().instance().has(&DataKey::Collaborators));
+    });
+}
+
+#[test]
+fn test_share_map_in_persistent_storage() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (contract_id, client) = setup(&env);
+
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, a.clone(), b.clone()], &vec![&env, 6000_u32, 4000_u32]);
+
+    env.as_contract(&contract_id, || {
+        let share_map: Map<Address, u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ShareMap)
+            .expect("share map must be in persistent storage");
+        assert_eq!(share_map.get(a).unwrap(), 6000);
+        assert_eq!(share_map.get(b).unwrap(), 4000);
+        // Must NOT be in instance storage
+        assert!(!env.storage().instance().has(&DataKey::ShareMap));
+    });
+}
+
+#[test]
+fn test_default_recipients_in_persistent_storage() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (contract_id, client) = setup(&env);
+
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, a.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    let r1 = Recipient { address: a.clone(), share: 7000_u32 };
+    let r2 = Recipient { address: b.clone(), share: 3000_u32 };
+    client.set_default_recipients(&vec![&env, r1, r2]);
+
+    env.as_contract(&contract_id, || {
+        let defaults: SorobanVec<Recipient> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DefaultRecipients)
+            .expect("default recipients must be in persistent storage");
+        assert_eq!(defaults.len(), 2);
+        // Must NOT be in instance storage
+        assert!(!env.storage().instance().has(&DataKey::DefaultRecipients));
+    });
+}
+
+// ── Issue #320: Two-step admin transfer ──────────────────────────────────────
+
+#[test]
+fn test_propose_admin_does_not_change_admin_immediately() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+    client.propose_admin_transfer(&new_admin);
+
+    // Admin must still be original — transfer not complete until accept_admin
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_accept_admin_completes_transfer() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+    client.propose_admin_transfer(&new_admin);
+    client.accept_admin();
+
+    assert_eq!(client.get_admin(), new_admin);
+}
+
+#[test]
+fn test_accept_admin_without_proposal_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    // No pending admin transfer has been proposed — must return an error
+    let result = client.try_accept_admin();
+    assert!(result.is_err(), "accept_admin without a pending proposal must error");
+}
+
+#[test]
+fn test_accept_admin_requires_pending_admin_auth() {
+    let env = Env::default();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    env.mock_all_auths_allowing_non_root_auth();
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+    client.propose_admin_transfer(&new_admin);
+
+    // Only the pending admin (new_admin) must sign accept_admin
+    env.mock_auths(&[MockAuth {
+        address: &new_admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "accept_admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.accept_admin();
+    assert_eq!(client.get_admin(), new_admin);
+}
+
+#[test]
+fn test_propose_admin_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+    client.propose_admin_transfer(&new_admin);
+
+    let events = env.events().all();
+    let found = events.iter().any(|(cid, topics, data)| {
+        cid == contract_id
+            && topics
+                == vec![
+                    &env,
+                    symbol_short!("royalty").into_val(&env),
+                    symbol_short!("adm_prop").into_val(&env),
+                ]
+            && val_eq(&env, data, new_admin.clone())
+    });
+    assert!(found, "adm_prop event not emitted");
+}
+
+#[test]
+fn test_accept_admin_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+    client.propose_admin_transfer(&new_admin);
+    client.accept_admin();
+
+    let events = env.events().all();
+    let found = events.iter().any(|(cid, topics, data)| {
+        cid == contract_id
+            && topics
+                == vec![
+                    &env,
+                    symbol_short!("royalty").into_val(&env),
+                    symbol_short!("adm_acc").into_val(&env),
+                ]
+            && val_eq(&env, data, (admin.clone(), new_admin.clone()))
+    });
+    assert!(found, "adm_acc event not emitted");
+}
+
+#[test]
+fn test_admin_transfer_blocked_when_multisig_active() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+    client.set_admins(&vec![&env, admin.clone(), b.clone()], &2);
+
+    // admin_transfer must be blocked when multi-sig is active
+    let result = client.try_admin_transfer(&new_admin);
+    assert!(result.is_err(), "admin_transfer must error when multi-sig is active");
+    // Admin unchanged
+    assert_eq!(client.get_admin(), admin);
+}
+
+// ── Issue #321: Multi-sig admin support ──────────────────────────────────────
+
+#[test]
+fn test_set_admins_stores_list() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+    client.set_admins(&vec![&env, admin.clone(), b.clone(), c.clone()], &2);
+
+    let admins = client.get_admins();
+    assert_eq!(admins.len(), 3);
+    assert_eq!(admins.get(0).unwrap(), admin);
+    assert_eq!(admins.get(1).unwrap(), b);
+    assert_eq!(admins.get(2).unwrap(), c);
+}
+
+#[test]
+fn test_get_admins_returns_empty_before_set() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    assert_eq!(client.get_admins().len(), 0);
+}
+
+#[test]
+fn test_multisig_sensitive_function_requires_threshold_auths() {
+    let env = Env::default();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = make_token(&env, &token_admin);
+
+    env.mock_all_auths_allowing_non_root_auth();
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+    // Set 2-of-2 multi-sig
+    client.set_admins(&vec![&env, admin.clone(), b.clone()], &2);
+
+    mint(&env, &token, &contract_id, 1000);
+
+    // Both admins must sign — provide both auth entries for the `distribute` entrypoint
+    env.mock_auths(&[
+        MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "distribute",
+                args: (&token,).into_val(&env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &b,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "distribute",
+                args: (&token,).into_val(&env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    client.distribute(&token);
+
+    // Verify distribution happened
+    let admin_bal = TokenClient::new(&env, &token).balance(&admin);
+    let b_bal = TokenClient::new(&env, &token).balance(&b);
+    assert_eq!(admin_bal + b_bal, 1000);
+}
+
+#[test]
+fn test_multisig_fails_with_fewer_than_threshold_auths() {
+    let env = Env::default();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = make_token(&env, &token_admin);
+
+    env.mock_all_auths_allowing_non_root_auth();
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+    // Set 2-of-2 multi-sig
+    client.set_admins(&vec![&env, admin.clone(), b.clone()], &2);
+
+    mint(&env, &token, &contract_id, 1000);
+
+    // Only provide one auth when two are required — must fail
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "distribute",
+            args: (&token,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.try_distribute(&token);
+    assert!(result.is_err(), "distribute must fail with only 1 of 2 required auths");
+}
+
+#[test]
+fn test_set_admins_requires_current_admin_auth() {
+    let env = Env::default();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let intruder = Address::generate(&env);
+
+    env.mock_all_auths_allowing_non_root_auth();
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    // Provide auth for intruder only (not admin) — must fail authorization
+    env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_admins",
+            args: (vec![&env, intruder.clone()], 1_u32).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.try_set_admins(&vec![&env, intruder.clone()], &1);
+    assert!(result.is_err(), "set_admins must require current admin auth");
+}
+
+#[test]
+fn test_set_admins_rejects_zero_threshold() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    let result = client.try_set_admins(&vec![&env, admin.clone()], &0);
+    assert!(result.is_err(), "threshold of 0 must be rejected");
+}
+
+#[test]
+fn test_set_admins_rejects_threshold_exceeds_list() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    // threshold=3 but only 2 admins in list — must be rejected
+    let result = client.try_set_admins(&vec![&env, admin.clone(), b.clone()], &3);
+    assert!(result.is_err(), "threshold exceeding admin count must be rejected");
+}
+
+#[test]
+fn test_set_admins_rejects_empty_list() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    let result = client.try_set_admins(&vec![&env], &1);
+    assert!(result.is_err(), "empty admin list must be rejected");
+}
+
+// ── Issue #323: set_royalty_rate history log ──────────────────────────────────
+
+#[test]
+fn test_rate_history_empty_before_first_change() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    assert_eq!(client.get_royalty_rate_history().len(), 0);
+}
+
+#[test]
+fn test_rate_history_records_entry_on_set() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+    client.set_royalty_rate(&500_u32);
+
+    let history = client.get_royalty_rate_history();
+    assert_eq!(history.len(), 1);
+
+    let entry = history.get(0).unwrap();
+    assert_eq!(entry.old_rate, 0);
+    assert_eq!(entry.new_rate, 500);
+    assert_eq!(entry.timestamp, 1_000_000);
+    assert_eq!(entry.caller, admin);
+}
+
+#[test]
+fn test_rate_history_records_consecutive_changes() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    env.ledger().with_mut(|l| l.timestamp = 100);
+    client.set_royalty_rate(&200_u32);
+
+    env.ledger().with_mut(|l| l.timestamp = 200);
+    client.set_royalty_rate(&400_u32);
+
+    env.ledger().with_mut(|l| l.timestamp = 300);
+    client.set_royalty_rate(&600_u32);
+
+    let history = client.get_royalty_rate_history();
+    assert_eq!(history.len(), 3);
+
+    let e0 = history.get(0).unwrap();
+    assert_eq!(e0.old_rate, 0);
+    assert_eq!(e0.new_rate, 200);
+    assert_eq!(e0.timestamp, 100);
+
+    let e1 = history.get(1).unwrap();
+    assert_eq!(e1.old_rate, 200);
+    assert_eq!(e1.new_rate, 400);
+    assert_eq!(e1.timestamp, 200);
+
+    let e2 = history.get(2).unwrap();
+    assert_eq!(e2.old_rate, 400);
+    assert_eq!(e2.new_rate, 600);
+    assert_eq!(e2.timestamp, 300);
+}
+
+#[test]
+fn test_rate_history_capped_at_limit() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+
+    // Write CAP + 3 entries — history must never exceed RATE_HISTORY_CAP
+    let total = RATE_HISTORY_CAP + 3;
+    for i in 1..=total {
+        // Alternate between two valid rates so old_rate != new_rate every call
+        let rate = if i % 2 == 0 { 100_u32 } else { 200_u32 };
+        env.ledger().with_mut(|l| l.timestamp = i as u64 * 10);
+        client.set_royalty_rate(&rate);
+    }
+
+    let history = client.get_royalty_rate_history();
+    assert_eq!(
+        history.len(),
+        RATE_HISTORY_CAP,
+        "history must be capped at RATE_HISTORY_CAP"
+    );
+
+    // Oldest entry dropped — first remaining entry should reflect change (total - CAP + 1)
+    let first = history.get(0).unwrap();
+    let expected_ts = (total - RATE_HISTORY_CAP + 1) as u64 * 10;
+    assert_eq!(
+        first.timestamp, expected_ts,
+        "oldest entry should have been evicted"
+    );
+}
+
+#[test]
+fn test_rate_history_in_persistent_storage() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone(), b.clone()], &vec![&env, 5000_u32, 5000_u32]);
+    client.set_royalty_rate(&300_u32);
+
+    env.as_contract(&contract_id, || {
+        let h: SorobanVec<RoyaltyRateChange> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoyaltyRateHistory)
+            .expect("history must be in persistent storage");
+        assert_eq!(h.len(), 1);
+        // Must NOT be in instance storage
+        assert!(!env.storage().instance().has(&DataKey::RoyaltyRateHistory));
+    });
 }
