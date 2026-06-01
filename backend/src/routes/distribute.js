@@ -3,6 +3,11 @@ import { addressToScVal } from "../stellar.js";
 import { validate, distributeSchema } from "../validation.js";
 import { buildAndRecordTransaction } from "./_shared.js";
 import { idempotencyMiddleware } from "../idempotency.js";
+import {
+  recordDistributeCall,
+  recordTransactionFailure,
+  recordTransactionSuccess,
+} from "../metrics.js";
 
 export const distributeRouter = Router();
 
@@ -14,6 +19,10 @@ export const distributeRouter = Router();
  */
 distributeRouter.post(
   "/",
+  (_req, _res, next) => {
+    recordDistributeCall();
+    next();
+  },
   idempotencyMiddleware,
   validate(distributeSchema),
   async (req, res, next) => {
@@ -31,8 +40,10 @@ distributeRouter.post(
         transactionMetadata: { tokenId },
       });
 
+      recordTransactionSuccess();
       res.json({ xdr, transactionId });
     } catch (err) {
+      recordTransactionFailure();
       if (err.status) {
         return res.status(err.status).json({ error: err.message });
       }

@@ -3,6 +3,7 @@
 Base URL: `http://localhost:3001` (default)
 
 All JSON POST bodies must use `Content-Type: application/json`.
+JSON request bodies are limited to `10kb`; oversized requests return `413 Payload Too Large`.
 
 ## Health
 
@@ -128,6 +129,29 @@ Returns on-chain collaborator addresses and shares.
 
 ## Contract
 
+### `GET /api/v1/contract/info`
+
+Returns the configured contract's current on-chain state for frontend initialization and operator dashboards.
+
+Uses `ROYALTY_CONTRACT_ID` or `CONTRACT_ID` by default. Pass `contractId` to override. Uses `ROYALTY_TOKEN_ID`, `TOKEN_CONTRACT_ID`, or `TOKEN_ID` by default for the balance token. Pass `tokenId` to override.
+
+**Response:**
+
+```json
+{
+  "contractId": "C...",
+  "adminAddress": "G...",
+  "royaltyRate": 500,
+  "recipients": [
+    { "address": "G...", "basisPoints": 5000 },
+    { "address": "G...", "basisPoints": 5000 }
+  ],
+  "balance": "10000000",
+  "tokenId": "C...",
+  "network": "Testnet"
+}
+```
+
 ### `GET /api/v1/contract/status/:contractId`
 
 **Response:** `{ initialized: boolean }`
@@ -143,6 +167,44 @@ Returns on-chain collaborator addresses and shares.
 ### `GET /api/v1/contract/shares-total/:contractId`
 
 **Response:** `{ contractId, totalShares }`
+
+## Metrics
+
+### `GET /metrics`
+
+Prometheus scrape endpoint. Also available at `GET /api/v1/metrics`.
+
+Exposes:
+
+- `stellar_distribute_calls_total`
+- `stellar_transactions_successful_total`
+- `stellar_transactions_failed_total`
+- `stellar_horizon_response_time_average_ms`
+- `stellar_horizon_response_time_count`
+
+## Local Seed
+
+### `scripts/seed.ts`
+
+Deploys the contract to Testnet, initializes recipients, sets a royalty rate, funds the contract with a configured token, and writes `.contract-id` plus backend environment values.
+
+Run with:
+
+```bash
+npx tsx scripts/seed.ts
+```
+
+Required environment:
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `SEED_TOKEN_ID` | — | Testnet token contract used to fund the royalty contract |
+| `STELLAR_NETWORK` | `testnet` | Must be `testnet` for the seed script |
+| `STELLAR_IDENTITY` | `deployer` | Stellar CLI identity used to deploy and sign |
+| `SEED_COLLABORATORS` | admin address | JSON array or comma-separated recipient addresses |
+| `SEED_SHARES` | `10000` | JSON array or comma-separated basis-point shares; must sum to 10000 |
+| `SEED_ROYALTY_RATE_BPS` | `500` | Royalty rate to set after initialization |
+| `SEED_FUND_AMOUNT` | `10000000` | Token amount transferred to the contract |
 
 ## Secondary royalty
 

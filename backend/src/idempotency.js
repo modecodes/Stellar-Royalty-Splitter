@@ -42,6 +42,7 @@ function cleanupExpiredEntries() {
 
 // Start cleanup interval
 const cleanupInterval = setInterval(cleanupExpiredEntries, 5 * 60 * 1000);
+cleanupInterval.unref?.();
 
 // Cleanup on shutdown
 process.on("exit", () => clearInterval(cleanupInterval));
@@ -186,5 +187,3 @@ export function clearCache() {
   cache.clear();
   logger.debug("Idempotency cache cleared");
 }
-
-</content>

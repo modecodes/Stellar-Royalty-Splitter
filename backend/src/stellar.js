@@ -17,6 +17,7 @@
  */
 import StellarSdk from "@stellar/stellar-sdk";
 import logger from "./logger.js";
+import { recordHorizonResponseTime } from "./metrics.js";
 
 const {
   Contract,
@@ -108,10 +109,12 @@ export async function checkHorizonConnectivity() {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    const requestStart = Date.now();
     const response = await fetch(url, {
       signal: controller.signal,
       headers: { Accept: "application/json" },
     });
+    recordHorizonResponseTime(Date.now() - requestStart);
     return {
       connected: response.ok,
       url: HORIZON_URL,
@@ -203,11 +206,13 @@ export async function pollHorizonTransaction(txHash) {
 
   while (Date.now() - start < TRANSACTION_POLL_TIMEOUT_MS) {
     try {
+      const requestStart = Date.now();
       const response = await withTimeout(
         fetch(url, { headers: { Accept: "application/json" } }),
         HORIZON_TIMEOUT_MS,
         "Horizon getTransaction",
       );
+      recordHorizonResponseTime(Date.now() - requestStart);
 
       if (response.status === 404) {
         await sleep(TRANSACTION_POLL_INTERVAL_MS);
@@ -271,10 +276,12 @@ export async function getRecommendedFee() {
   const timer = setTimeout(() => controller.abort(), HORIZON_TIMEOUT_MS);
 
   try {
+    const requestStart = Date.now();
     const response = await fetch(url, {
       signal: controller.signal,
       headers: { Accept: "application/json" },
     });
+    recordHorizonResponseTime(Date.now() - requestStart);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     // Prefer `p50_accepted_fee` (median accepted), fall back to

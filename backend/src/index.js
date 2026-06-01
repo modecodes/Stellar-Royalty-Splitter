@@ -18,6 +18,7 @@ import { analyticsRouter } from "./routes/analytics.js";
 import { contractRouter } from "./routes/contract.js";
 import { healthRouter } from "./routes/health.js";
 import { adminRouter } from "./routes/admin.js";
+import { metricsRouter } from "./routes/metrics.js";
 import { initializeDatabase } from "./database/index.js";
 import db from "./database/index.js";
 import { initializeSigningKey } from "./signing-key.js";
@@ -121,6 +122,8 @@ app.use("/api/v1", webhooksRouter);
 app.use("/api/v1", analyticsRouter);
 app.use("/api/v1/contract", contractRouter);
 app.use("/api/v1/health", healthRouter);
+app.use("/metrics", metricsRouter);
+app.use("/api/v1/metrics", metricsRouter);
 
 // Admin operations (separate from /api/v1; protected by ADMIN_ROTATE_TOKEN)
 const adminLimiter = rateLimit({
@@ -140,6 +143,9 @@ app.use("/api", (req, res) => {
 
 // Central error handler
 app.use((err, _req, res, _next) => {
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({ error: "Payload too large" });
+  }
   logger.error(err);
 
   // Structured errors thrown by stellar.js (Soroban / RPC errors)
