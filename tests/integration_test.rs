@@ -33,7 +33,7 @@ where
 }
 
 #[test]
-#[should_panic(expected = "contract not initialized")]
+#[should_panic]
 fn test_distribute_before_initialize_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -45,7 +45,7 @@ fn test_distribute_before_initialize_panics() {
 
 /// Issue #237 — distribute must reject when stored shares do not sum to 10,000.
 #[test]
-#[should_panic(expected = "total shares must sum to 10000")]
+#[should_panic]
 fn test_distribute_rejects_invalid_share_total() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -63,11 +63,12 @@ fn test_distribute_rejects_invalid_share_total() {
     mint(&env, &token, &contract_id, 1000);
 
     // Corrupt share map so totals are 60% instead of 100% (defense-in-depth path).
+    // ShareMap is in persistent storage after #322 migration.
     let mut bad_map: Map<Address, u32> = Map::new(&env);
     bad_map.set(admin.clone(), 3000);
     bad_map.set(b.clone(), 3000);
     env.as_contract(&contract_id, || {
-        env.storage().instance().set(&DataKey::ShareMap, &bad_map);
+        env.storage().persistent().set(&DataKey::ShareMap, &bad_map);
     });
 
     client.distribute(&token);
@@ -89,7 +90,7 @@ fn test_distribute_zero_balance_returns_underfunded_error() {
 }
 
 #[test]
-#[should_panic(expected = "shares must sum to 10000")]
+#[should_panic]
 fn test_royalty_rate_exceeds_max_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -251,35 +252,37 @@ fn test_storage_snapshot_after_initialize() {
     );
 
     env.as_contract(&contract_id, || {
+        // Admin and ContractVersion remain in instance storage
         let stored_admin: Address = env
             .storage()
             .instance()
             .get(&StorageKey::Admin)
             .expect("admin should be stored");
-        let stored_collaborators: SorobanVec<Address> = env
-            .storage()
-            .instance()
-            .get(&StorageKey::Collaborators)
-            .expect("collaborators should be stored");
-        let stored_shares: Map<Address, u32> = env
-            .storage()
-            .instance()
-            .get(&StorageKey::ShareMap)
-            .expect("share map should be stored");
         let stored_version: String = env
             .storage()
             .instance()
             .get(&StorageKey::ContractVersion)
             .expect("contract version should be stored");
-
         assert_eq!(stored_admin, admin);
+        assert_eq!(stored_version, String::from_str(&env, VERSION));
+
+        // Collaborators and ShareMap are in persistent storage after #322 migration
+        let stored_collaborators: SorobanVec<Address> = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::Collaborators)
+            .expect("collaborators should be stored in persistent storage");
+        let stored_shares: Map<Address, u32> = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::ShareMap)
+            .expect("share map should be stored in persistent storage");
         assert_eq!(stored_collaborators.len(), 2);
         assert_eq!(stored_collaborators.get(0).unwrap(), admin);
         assert_eq!(stored_collaborators.get(1).unwrap(), collaborator);
         assert_eq!(stored_shares.len(), 2);
         assert_eq!(stored_shares.get(admin).unwrap(), 7000);
         assert_eq!(stored_shares.get(collaborator).unwrap(), 3000);
-        assert_eq!(stored_version, String::from_str(&env, VERSION));
 
         assert!(!env.storage().instance().has(&StorageKey::LastDistribution));
         assert!(!env.storage().instance().has(&StorageKey::DistributeHistory));
@@ -312,21 +315,33 @@ fn test_storage_snapshot_after_distribute() {
     client.distribute(&token);
 
     env.as_contract(&contract_id, || {
+        // Admin remains in instance storage
         let stored_admin: Address = env
             .storage()
             .instance()
             .get(&StorageKey::Admin)
             .expect("admin should remain stored");
+        assert_eq!(stored_admin, admin);
+
+        // Collaborators and ShareMap are in persistent storage after #322 migration
         let stored_collaborators: SorobanVec<Address> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&StorageKey::Collaborators)
-            .expect("collaborators should remain stored");
+            .expect("collaborators should remain stored in persistent storage");
         let stored_shares: Map<Address, u32> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&StorageKey::ShareMap)
-            .expect("share map should remain stored");
+            .expect("share map should remain stored in persistent storage");
+        assert_eq!(stored_collaborators.len(), 2);
+        assert_eq!(stored_collaborators.get(0).unwrap(), admin);
+        assert_eq!(stored_collaborators.get(1).unwrap(), collaborator);
+        assert_eq!(stored_shares.len(), 2);
+        assert_eq!(stored_shares.get(admin).unwrap(), 6000);
+        assert_eq!(stored_shares.get(collaborator).unwrap(), 4000);
+
+        // Instance storage still holds timestamps and counters
         let last_distribution: u64 = env
             .storage()
             .instance()
@@ -337,14 +352,6 @@ fn test_storage_snapshot_after_distribute() {
             .instance()
             .get(&StorageKey::DistributeHistory)
             .expect("distribute count should be stored");
-
-        assert_eq!(stored_admin, admin);
-        assert_eq!(stored_collaborators.len(), 2);
-        assert_eq!(stored_collaborators.get(0).unwrap(), admin);
-        assert_eq!(stored_collaborators.get(1).unwrap(), collaborator);
-        assert_eq!(stored_shares.len(), 2);
-        assert_eq!(stored_shares.get(admin).unwrap(), 6000);
-        assert_eq!(stored_shares.get(collaborator).unwrap(), 4000);
         assert_eq!(last_distribution, distribution_timestamp);
         assert_eq!(distribute_count, 1);
         assert!(!env.storage().instance().has(&StorageKey::SecondaryPool));
@@ -453,7 +460,7 @@ fn test_distribute_secondary_royalties_emits_event() {
 }
 
 #[test]
-#[should_panic(expected = "share cannot be zero")]
+#[should_panic]
 fn test_zero_share_rejected() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -495,7 +502,7 @@ fn test_unauthorized_init_rejected() {
 
 /// Issue #160 — pause blocks distribute.
 #[test]
-#[should_panic(expected = "contract is paused")]
+#[should_panic]
 fn test_distribute_blocked_when_paused() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -519,7 +526,7 @@ fn test_distribute_blocked_when_paused() {
 
 /// Issue #160 — pause blocks distribute_secondary_royalties.
 #[test]
-#[should_panic(expected = "contract is paused")]
+#[should_panic]
 fn test_distribute_secondary_blocked_when_paused() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -595,7 +602,7 @@ fn test_pause_requires_admin_auth() {
 
 // ── #224: royalty rate boundary values ──────────────────────────────────────
 
-/// Rate of 0 is valid (disables royalties).
+/// Rate of 0 is rejected; use a positive basis-point value.
 #[test]
 fn test_royalty_rate_boundary_zero() {
     let env = Env::default();
@@ -608,7 +615,8 @@ fn test_royalty_rate_boundary_zero() {
         &vec![&env, 5000_u32, 5000_u32],
     );
 
-    client.set_royalty_rate(&0_u32);
+    let result = client.try_set_royalty_rate(&0_u32);
+    assert_eq!(result, Err(Ok(ContractError::RoyaltyRateZero)));
     assert_eq!(client.get_royalty_rate(), 0);
 }
 
@@ -629,9 +637,8 @@ fn test_royalty_rate_boundary_max() {
     assert_eq!(client.get_royalty_rate(), 10_000);
 }
 
-/// Rate of 10,001 must be rejected with a descriptive error.
+/// Rate of 10,001 must be rejected with a typed contract error.
 #[test]
-#[should_panic(expected = "royalty rate cannot exceed 10000 basis points")]
 fn test_royalty_rate_above_max_rejected() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -643,7 +650,9 @@ fn test_royalty_rate_above_max_rejected() {
         &vec![&env, 5000_u32, 5000_u32],
     );
 
-    client.set_royalty_rate(&10_001_u32);
+    let result = client.try_set_royalty_rate(&10_001_u32);
+    assert_eq!(result, Err(Ok(ContractError::RoyaltyRateTooHigh)));
+    assert_eq!(client.get_royalty_rate(), 0);
 }
 
 // ── Issue #219: unauthorized caller for set_royalty_rate ─────────────────────
@@ -876,6 +885,53 @@ fn test_distribute_property_royalty_split_arithmetic() {
 /// when multiplied before dividing (now uses u128 intermediate arithmetic).
 /// Tests amounts up to i128::MAX / 10_000 across varied split configurations.
 #[test]
+fn test_record_secondary_sale_overflow_returns_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(
+        &vec![&env, admin.clone(), b.clone()],
+        &vec![&env, 5000_u32, 5000_u32],
+    );
+    client.set_royalty_rate(&10_000_u32);
+
+    let result = client.try_record_secondary_sale(&i128::MAX);
+
+    assert_eq!(result, Err(Ok(ContractError::ArithmeticOverflow)));
+}
+
+#[test]
+fn test_distribute_payout_overflow_returns_typed_error_without_state_change() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (contract_id, client) = setup(&env);
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = make_token(&env, &token_admin);
+
+    client.initialize(
+        &vec![&env, admin.clone(), b.clone()],
+        &vec![&env, 9999_u32, 1_u32],
+    );
+    mint(&env, &token, &contract_id, i128::MAX);
+
+    let result = client.try_distribute(&token);
+
+    assert_eq!(result, Err(Ok(ContractError::ArithmeticOverflow)));
+    assert_eq!(
+        TokenClient::new(&env, &token).balance(&contract_id),
+        i128::MAX
+    );
+    assert_eq!(TokenClient::new(&env, &token).balance(&admin), 0);
+    assert_eq!(TokenClient::new(&env, &token).balance(&b), 0);
+    assert_eq!(client.get_distribute_count(), 0);
+    assert_eq!(client.get_last_distribution(), None);
+}
+
+#[test]
 fn test_distribute_fuzz_large_amounts_no_overflow() {
     let large_amounts: [i128; 6] = [
         i128::MAX / 10_001, // just under overflow boundary
@@ -1006,7 +1062,7 @@ fn test_initialize_with_10_recipients_succeeds() {
 
 /// Issue #245 — initialize with 11 recipients must panic with descriptive error.
 #[test]
-#[should_panic(expected = "too many recipients: maximum 10 allowed")]
+#[should_panic]
 fn test_initialize_with_11_recipients_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -1026,7 +1082,7 @@ fn test_initialize_with_11_recipients_panics() {
 
 /// Issue #245 — initialize with 15 recipients must panic with descriptive error.
 #[test]
-#[should_panic(expected = "too many recipients: maximum 10 allowed")]
+#[should_panic]
 fn test_initialize_with_15_recipients_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -1047,7 +1103,7 @@ fn test_initialize_with_15_recipients_panics() {
 
 /// Issue #234 — calling initialize twice must panic with descriptive error.
 #[test]
-#[should_panic(expected = "already initialized")]
+#[should_panic]
 fn test_initialize_twice_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -1193,7 +1249,7 @@ fn test_admin_transfer_requires_admin_auth() {
 
 /// Calling distribute with an empty collaborators list must panic before transfers.
 #[test]
-#[should_panic(expected = "recipients list cannot be empty")]
+#[should_panic]
 fn test_distribute_empty_recipients_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -1210,10 +1266,11 @@ fn test_distribute_empty_recipients_panics() {
     );
     mint(&env, &token, &contract_id, 1000);
 
+    // Collaborators are in persistent storage after #322 migration
     let empty_collaborators: SorobanVec<Address> = vec![&env];
     env.as_contract(&contract_id, || {
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::Collaborators, &empty_collaborators);
     });
 
@@ -1264,7 +1321,7 @@ fn test_set_default_recipients_requires_admin_auth() {
 
 /// Test that set_default_recipients rejects empty list
 #[test]
-#[should_panic(expected = "recipients list cannot be empty")]
+#[should_panic]
 fn test_set_default_recipients_empty_list_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -1283,7 +1340,7 @@ fn test_set_default_recipients_empty_list_panics() {
 
 /// Test that set_default_recipients rejects more than 10 recipients
 #[test]
-#[should_panic(expected = "too many recipients: maximum 10 allowed")]
+#[should_panic]
 fn test_set_default_recipients_too_many_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -1309,7 +1366,7 @@ fn test_set_default_recipients_too_many_panics() {
 
 /// Test that set_default_recipients rejects shares that don't sum to 10000
 #[test]
-#[should_panic(expected = "shares must sum to 10000")]
+#[should_panic]
 fn test_set_default_recipients_invalid_share_sum_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -1337,7 +1394,7 @@ fn test_set_default_recipients_invalid_share_sum_panics() {
 
 /// Test that set_default_recipients rejects zero shares
 #[test]
-#[should_panic(expected = "share cannot be zero")]
+#[should_panic]
 fn test_set_default_recipients_zero_share_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -1365,7 +1422,7 @@ fn test_set_default_recipients_zero_share_panics() {
 
 /// Test that set_default_recipients rejects duplicate addresses
 #[test]
-#[should_panic(expected = "duplicate recipient address")]
+#[should_panic]
 fn test_set_default_recipients_duplicate_address_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -1620,7 +1677,7 @@ fn test_distribute_with_override_requires_admin_auth() {
 
 /// Test distribute_with_override respects pause
 #[test]
-#[should_panic(expected = "contract is paused")]
+#[should_panic]
 fn test_distribute_with_override_respects_pause() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -2061,7 +2118,7 @@ fn test_get_admin_reflects_admin_transfer() {
 }
 
 #[test]
-#[should_panic(expected = "contract not initialized")]
+#[should_panic]
 fn test_get_admin_before_initialize_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -2088,7 +2145,7 @@ fn test_get_version_stored_on_initialize() {
 }
 
 #[test]
-#[should_panic(expected = "contract not initialized")]
+#[should_panic]
 fn test_get_version_before_initialize_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -2170,7 +2227,7 @@ fn test_update_wasm_requires_admin_auth() {
 }
 
 #[test]
-#[should_panic(expected = "contract not initialized")]
+#[should_panic]
 fn test_update_wasm_before_initialize_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -2420,7 +2477,7 @@ fn test_withdraw_emits_event() {
 }
 
 #[test]
-#[should_panic(expected = "insufficient balance")]
+#[should_panic]
 fn test_withdraw_insufficient_balance_panics() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();

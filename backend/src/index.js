@@ -13,6 +13,7 @@ import { collaboratorsRouter } from "./routes/collaborators.js";
 import { secondaryRoyaltyRouter } from "./routes/secondary-royalty.js";
 import { simulateRouter } from "./routes/simulate.js";
 import historyRouter from "./routes/history.js";
+import webhooksRouter from "./routes/webhooks.js";
 import { analyticsRouter } from "./routes/analytics.js";
 import { contractRouter } from "./routes/contract.js";
 import { healthRouter } from "./routes/health.js";
@@ -108,6 +109,7 @@ app.use((req, res, next) => {
 app.use("/api/v1/initialize", writeLimiter);
 app.use("/api/v1/distribute", writeLimiter);
 app.use("/api/v1/secondary-royalty", writeLimiter);
+app.use("/api/v1/webhooks", writeLimiter);
 
 app.use("/api/v1/initialize", initializeRouter);
 app.use("/api/v1/distribute", distributeRouter);
@@ -115,6 +117,7 @@ app.use("/api/v1/collaborators", collaboratorsRouter);
 app.use("/api/v1/secondary-royalty", secondaryRoyaltyRouter);
 app.use("/api/v1/simulate", simulateRouter);
 app.use("/api/v1", historyRouter);
+app.use("/api/v1", webhooksRouter);
 app.use("/api/v1", analyticsRouter);
 app.use("/api/v1/contract", contractRouter);
 app.use("/api/v1/health", healthRouter);

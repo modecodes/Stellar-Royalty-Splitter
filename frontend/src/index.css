@@ -463,6 +463,25 @@ td:last-child {
   border: 1px solid var(--info);
 }
 
+.form-status__tx-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: 0.5rem;
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.form-status__tx-link:hover {
+  opacity: 0.85;
+}
+
+.form-status__tx-icon {
+  font-size: 0.85em;
+}
+
 small {
   display: block;
   font-size: 0.75rem;

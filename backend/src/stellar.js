@@ -53,6 +53,14 @@ const HORIZON_FEE_CACHE_MS = parsePositiveInt(
   process.env.HORIZON_FEE_CACHE_MS,
   30_000,
 );
+const TRANSACTION_POLL_TIMEOUT_MS = parsePositiveInt(
+  process.env.TRANSACTION_POLL_TIMEOUT_MS,
+  60_000,
+);
+const TRANSACTION_POLL_INTERVAL_MS = parsePositiveInt(
+  process.env.TRANSACTION_POLL_INTERVAL_MS,
+  2_000,
+);
 
 export const server = new SorobanRpc.Server(RPC_URL, { allowHttp: false });
 export const networkPassphrase =
@@ -178,6 +186,61 @@ export async function checkContractDeploymentStatus(contractId) {
       status: "error",
     };
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Poll Horizon until a transaction is confirmed in a ledger (#297).
+ * Returns { status, ledger, createdAt } when the transaction is found.
+ * Throws { status: 504, message } on timeout.
+ */
+export async function pollHorizonTransaction(txHash) {
+  const url = `${HORIZON_URL.replace(/\/$/, "")}/transactions/${txHash}`;
+  const start = Date.now();
+
+  while (Date.now() - start < TRANSACTION_POLL_TIMEOUT_MS) {
+    try {
+      const response = await withTimeout(
+        fetch(url, { headers: { Accept: "application/json" } }),
+        HORIZON_TIMEOUT_MS,
+        "Horizon getTransaction",
+      );
+
+      if (response.status === 404) {
+        await sleep(TRANSACTION_POLL_INTERVAL_MS);
+        continue;
+      }
+
+      if (!response.ok) {
+        throw new Error(`Horizon returned HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      return {
+        status: data.successful ? "confirmed" : "failed",
+        ledger: data.ledger,
+        createdAt: data.created_at ?? null,
+      };
+    } catch (error) {
+      if (error?.status === 504) {
+        throw error;
+      }
+      logger.warn?.("Horizon transaction poll attempt failed", {
+        txHash: txHash.substring(0, 8),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    await sleep(TRANSACTION_POLL_INTERVAL_MS);
+  }
+
+  throw {
+    status: 504,
+    message: `Transaction not confirmed within ${TRANSACTION_POLL_TIMEOUT_MS}ms`,
+  };
 }
 
 // ── Dynamic fee (#274) ─────────────────────────────────────────────────────
@@ -540,4 +603,6 @@ export const _config = {
   HORIZON_TIMEOUT_MS,
   HORIZON_FEE_CACHE_MS,
   HORIZON_URL,
+  TRANSACTION_POLL_TIMEOUT_MS,
+  TRANSACTION_POLL_INTERVAL_MS,
 };

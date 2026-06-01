@@ -65,6 +65,7 @@ export default function DistributeForm({
   const [draftDecisionMade, setDraftDecisionMade] = useState(false);
   const { status, setStatus, clearStatus } = useFormStatus();
   const [loading, setLoading] = useState(false);
+  const [successTxHash, setSuccessTxHash] = useState<string | null>(null);
   const draftKey = useMemo(
     () => `${DRAFT_KEY_PREFIX}:${walletAddress}:${contractId || "no-contract"}`,
     [contractId, walletAddress],
@@ -189,9 +190,11 @@ export default function DistributeForm({
       await api.confirmTransaction(hash, {
         status: "confirmed",
         blockTime: new Date().toISOString(),
+        transactionId: res.transactionId,
       });
 
-      setStatus("ok", `Distributed. Tx: ${hash}`);
+      setSuccessTxHash(hash);
+      setStatus("ok", "Distributed successfully.");
       localStorage.removeItem(draftKey);
       setTokenId("");
       setAmount("");
@@ -224,6 +227,7 @@ export default function DistributeForm({
     setContractBalance(null);
     setDraftPrompt(null);
     setDraftDecisionMade(true);
+    setSuccessTxHash(null);
     localStorage.removeItem(draftKey);
     clearStatus();
   }
@@ -245,10 +249,10 @@ export default function DistributeForm({
             <p>Saved token and amount values are available for this contract.</p>
           </div>
           <div className="restore-actions">
-            <button type="button" className="btn-primary" onClick={restoreDraft}>
+            <button type="button" className="btn-primary" onClick={restoreDraft} disabled={loading}>
               Restore
             </button>
-            <button type="button" className="btn-secondary" onClick={discardDraft}>
+            <button type="button" className="btn-secondary" onClick={discardDraft} disabled={loading}>
               Discard
             </button>
           </div>
@@ -262,6 +266,7 @@ export default function DistributeForm({
         value={tokenId}
         autoComplete="off"
         spellCheck={false}
+        disabled={loading}
         onChange={(e) => { setTokenId(e.target.value); setAmount(""); }}
       />
       {tokenId && (
@@ -281,7 +286,7 @@ export default function DistributeForm({
         placeholder="0"
         value={amount}
         onChange={(e) => setAmount(e.target.value)}
-        disabled={contractBalance === null}
+        disabled={contractBalance === null || loading}
         aria-invalid={exceedsBalance ? "true" : undefined}
         aria-describedby={exceedsBalance ? "distribute-amount-error" : undefined}
       />
@@ -338,7 +343,22 @@ export default function DistributeForm({
           Clear
         </button>
       </div>
-      {status && <FormStatus type={status.type} message={status.message} />}
+      {status && (
+        <FormStatus
+          type={status.type}
+          message={status.message}
+          txHash={successTxHash ?? undefined}
+          network={network}
+          distributionData={
+            status.type === "ok"
+              ? {
+                  totalDistributed: parsedAmount,
+                  recipientCount: collaborators.length,
+                }
+              : undefined
+          }
+        />
+      )}
     </form>
   );
 }

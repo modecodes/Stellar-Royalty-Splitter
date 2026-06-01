@@ -16,6 +16,7 @@ import DistributeSecondaryRoyalties from "./components/DistributeSecondaryRoyalt
 import ResaleHistory from "./components/ResaleHistory";
 import { Skeleton } from "./components/Skeleton";
 import { CopyButton } from "./components/CopyButton";
+import { OnboardingWalkthrough } from "./components/OnboardingWalkthrough";
 import { api } from "./api";
 
 
@@ -142,7 +143,10 @@ export default function App() {
   }, [toggleTheme]);
 
   function handleDisconnect() {
+    // Clear all wallet state and any cached wallet data from localStorage
     setWalletAddress(null);
+    localStorage.removeItem("lastWalletAddress");
+    localStorage.removeItem("freighter_connected");
   }
 
   const renderPage = () => {
@@ -358,6 +362,7 @@ export default function App() {
         <div className="app-main">{renderPage()}</div>
       </div>
 
+      <OnboardingWalkthrough />
     </div>
   );
 }
