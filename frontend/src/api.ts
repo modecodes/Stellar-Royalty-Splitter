@@ -1,5 +1,7 @@
 // Thin client that talks to the Express backend
 
+import { extractContractError } from "./lib/contract-errors";
+
 const BASE = "/api";
 export const SESSION_EXPIRED_EVENT = "srs:session-expired";
 const SESSION_EXPIRED_MESSAGE =
@@ -58,6 +60,35 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   throw new Error(getErrorMessage(data, res.status));
 }
 
+// #279: surface a structured `code + message + details` shape from
+// the backend's error response instead of just `data.error`. The
+// caller's `catch (e)` block can call `extractContractError(e)` to
+// pull the same fields back out and the toast surfaces the real
+// failure reason (`Caller is not the contract admin (code 2)`)
+// rather than a generic "transaction failed".
+export class BackendApiError extends Error {
+  code: string | number | null;
+  details?: string;
+  status: number;
+  constructor(
+    status: number,
+    code: string | number | null,
+    message: string,
+    details?: string,
+  ) {
+    super(message);
+    this.name = "BackendApiError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+function readErrorBody(status: number, data: unknown): BackendApiError {
+  const parsed = extractContractError(data ?? { error: "Request failed" });
+  return new BackendApiError(status, parsed.code, parsed.message, parsed.details);
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
   return request<T>(path, {
     method: "POST",
@@ -68,6 +99,16 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 async function get<T>(path: string): Promise<T> {
   return request<T>(path);
+  const data = await res.json();
+  if (!res.ok) throw readErrorBody(res.status, data);
+  return data as T;
+}
+
+async function get<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`);
+  const data = await res.json();
+  if (!res.ok) throw readErrorBody(res.status, data);
+  return data as T;
 }
 
 export interface TransactionRecord {
@@ -138,6 +179,11 @@ export const api = {
     tokenId: string;
   }) => post<{ xdr: string; transactionId: number }>("/distribute", body),
 
+  getContractBalance: (contractId: string, tokenId: string) =>
+    get<{ balance: string }>(
+      `/contract/balance/${contractId}?tokenId=${encodeURIComponent(tokenId)}`,
+    ),
+
   getCollaborators: (contractId: string) =>
     get<{ address: string; basisPoints: number }[]>(
       `/collaborators/${contractId}`,
@@ -162,6 +208,7 @@ export const api = {
       status: "pending" | "confirmed" | "failed";
       blockTime?: string;
       errorMessage?: string;
+      transactionId?: number;
     },
   ) =>
     post<{ success: boolean; message: string }>(
@@ -271,6 +318,8 @@ export const api = {
 
   getContractVersion: (contractId: string) =>
     get<{ version: string }>(`/contract/version/${contractId}`),
+  getContractVersion: (contractId: string) =>
+    get<{ contractId: string; version: string }>(`/contract/version/${contractId}`),
 
   // NEW: Fetch royalty rate from contract
   getRoyaltyRate: (contractId: string) =>

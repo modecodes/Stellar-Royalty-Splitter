@@ -6,20 +6,26 @@ import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import logger from "./logger.js";
+import { resolveCorsOrigin } from "./cors-config.js";
 import { initializeRouter } from "./routes/initialize.js";
 import { distributeRouter } from "./routes/distribute.js";
 import { collaboratorsRouter } from "./routes/collaborators.js";
 import { secondaryRoyaltyRouter } from "./routes/secondary-royalty.js";
 import { simulateRouter } from "./routes/simulate.js";
 import historyRouter from "./routes/history.js";
+import webhooksRouter from "./routes/webhooks.js";
 import { analyticsRouter } from "./routes/analytics.js";
 import { contractRouter } from "./routes/contract.js";
 import { healthRouter } from "./routes/health.js";
+import { adminRouter } from "./routes/admin.js";
+import { metricsRouter } from "./routes/metrics.js";
 import { initializeDatabase } from "./database/index.js";
 import db from "./database/index.js";
+import { initializeSigningKey } from "./signing-key.js";
 
 // Initialize database on startup
 initializeDatabase();
+initializeSigningKey();
 
 const app = express();
 
@@ -43,10 +49,15 @@ app.use(helmet());
 
 const corsPreflightMaxAge = parseInt(process.env.CORS_PREFLIGHT_MAX_AGE ?? "86400", 10);
 
-// CORS restricted to configured frontend origin
+// #276: env-driven CORS origin. resolveCorsOrigin validates the value
+// (rejects malformed URLs, rejects '*' in production), and refuses to
+// start when FRONTEND_ORIGIN is unset in production so a misconfigured
+// deployment can never silently open the policy to all origins.
+const corsOrigin = resolveCorsOrigin();
+logger.info("CORS origin configured", { origin: corsOrigin });
 app.use(
   cors({
-    origin: process.env.FRONTEND_ORIGIN ?? "http://localhost:5173",
+    origin: corsOrigin,
     methods: ["GET", "POST"],
     maxAge: Number.isNaN(corsPreflightMaxAge) ? 86400 : corsPreflightMaxAge,
   })
@@ -99,6 +110,7 @@ app.use((req, res, next) => {
 app.use("/api/v1/initialize", writeLimiter);
 app.use("/api/v1/distribute", writeLimiter);
 app.use("/api/v1/secondary-royalty", writeLimiter);
+app.use("/api/v1/webhooks", writeLimiter);
 
 app.use("/api/v1/initialize", initializeRouter);
 app.use("/api/v1/distribute", distributeRouter);
@@ -106,9 +118,23 @@ app.use("/api/v1/collaborators", collaboratorsRouter);
 app.use("/api/v1/secondary-royalty", secondaryRoyaltyRouter);
 app.use("/api/v1/simulate", simulateRouter);
 app.use("/api/v1", historyRouter);
+app.use("/api/v1", webhooksRouter);
 app.use("/api/v1", analyticsRouter);
 app.use("/api/v1/contract", contractRouter);
 app.use("/api/v1/health", healthRouter);
+app.use("/metrics", metricsRouter);
+app.use("/api/v1/metrics", metricsRouter);
+
+// Admin operations (separate from /api/v1; protected by ADMIN_ROTATE_TOKEN)
+const adminLimiter = rateLimit({
+  windowMs: 60_000,
+  max: parseInt(process.env.RATE_LIMIT_ADMIN_MAX ?? "5"),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many admin requests, please slow down." },
+});
+app.use("/admin", adminLimiter);
+app.use("/admin", adminRouter);
 
 // Legacy /api/* redirect to /api/v1/*
 app.use("/api", (req, res) => {
@@ -117,7 +143,25 @@ app.use("/api", (req, res) => {
 
 // Central error handler
 app.use((err, _req, res, _next) => {
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({ error: "Payload too large" });
+  }
   logger.error(err);
+
+  // Structured errors thrown by stellar.js (Soroban / RPC errors)
+  if (err.status && err.code) {
+    return res.status(err.status).json({
+      error: err.message,
+      code: err.code,
+      ...(err.detail !== undefined && { detail: err.detail }),
+    });
+  }
+
+  // Structured errors with status but no code (e.g. validation helpers)
+  if (err.status) {
+    return res.status(err.status).json({ error: err.message });
+  }
+
   res.status(500).json({ error: err.message ?? "Internal server error" });
 });
 

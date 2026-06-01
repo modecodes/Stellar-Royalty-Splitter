@@ -105,8 +105,11 @@ export default function CollaboratorTable({ contractId, refreshKey }: Props) {
                   onClick={() => copyAddress(c.address)}
                   title={copied === c.address ? "Address copied" : "Copy address"}
                   aria-label={copied === c.address ? "Address copied" : "Copy collaborator address"}
+                  className={`copy-btn-sm${copied === c.address ? " copied" : ""}`}
+                  onClick={() => copyAddress(c.address)}
+                  title={copied === c.address ? "Address copied" : "Copy address"}
                 >
-                  ⧉
+                  {copied === c.address ? "✓" : "⧉"}
                 </button>
               </td>
               <td style={{ textAlign: "right" }}>
