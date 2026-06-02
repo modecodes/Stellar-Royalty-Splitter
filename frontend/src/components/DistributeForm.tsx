@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { api } from "../api";
+import { getContractAddressError, isValidContractAddress } from "../lib/stellar-address";
 import { signAndSubmitTransaction } from "../stellar";
 import { useNetwork } from "../context/NetworkContext";
 import FormStatus from "./FormStatus";
@@ -137,6 +138,11 @@ export default function DistributeForm({
   const parsedBalance = contractBalance !== null ? parseFloat(contractBalance) : null;
   const exceedsBalance =
     parsedBalance !== null && !isNaN(parsedAmount) && parsedAmount > parsedBalance;
+  // Live token-address validation. The error is null for empty input so an
+  // untouched field is not flagged as malformed (emptiness is reported as a
+  // "required" error on submit instead, matching existing behaviour).
+  const tokenIdError = getContractAddressError(tokenId);
+  const tokenIdValid = isValidContractAddress(tokenId);
   const recipientBreakdown = useMemo(() => {
     if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || collaborators.length === 0) {
       return [];
@@ -167,6 +173,8 @@ export default function DistributeForm({
       return setStatus("error", "Enter a contract ID first.");
     if (!tokenId)
       return setStatus("error", "Enter a token address.");
+    if (!tokenIdValid)
+      return setStatus("error", "Enter a valid Stellar token address (C...).");
     if (!amount || isNaN(parsedAmount) || parsedAmount <= 0)
       return setStatus("error", "Enter a valid amount.");
     if (exceedsBalance)
@@ -267,8 +275,15 @@ export default function DistributeForm({
         autoComplete="off"
         spellCheck={false}
         disabled={loading}
+        aria-invalid={tokenIdError ? "true" : undefined}
+        aria-describedby={tokenIdError ? "distribute-token-id-error" : undefined}
         onChange={(e) => { setTokenId(e.target.value); setAmount(""); }}
       />
+      {tokenIdError && (
+        <p className="field-error" id="distribute-token-id-error" role="alert">
+          {tokenIdError}
+        </p>
+      )}
       {tokenId && (
         <p className="description" id="contract-balance-status" aria-live="polite">
           {balanceLoading
@@ -328,7 +343,7 @@ export default function DistributeForm({
         <button
           type="submit"
           className="btn-primary btn-with-spinner"
-          disabled={loading || exceedsBalance || !amount}
+          disabled={loading || exceedsBalance || !amount || !tokenIdValid}
           aria-busy={loading}
         >
           {loading && <span className="btn-spinner" aria-hidden="true" />}
