@@ -55,6 +55,24 @@ Build an unsigned `initialize` transaction XDR.
 
 **Response:** `{ xdr, transactionId }`
 
+Initialize requests are rejected before contract processing when the request body is too large or when the serialized `collaborators` array exceeds the initialize payload guard.
+
+**Oversized payload response:** `413 Payload Too Large`
+
+```json
+{
+  "error": "Payload too large"
+}
+```
+
+Collaborator-specific payload limit responses use:
+
+```json
+{
+  "error": "Collaborators payload too large"
+}
+```
+
 ## Distribute
 
 ### `POST /api/v1/distribute`
@@ -129,9 +147,33 @@ Returns on-chain collaborator addresses and shares.
 
 ## Contract
 
+### `GET /api/v1/contract/state`
+
+Returns the configured contract's current state for frontend displays: admin address, royalty rate, recipient shares, token balance, and network details. Responses are cached for 30 seconds to reduce Soroban RPC calls.
+
+Uses `ROYALTY_CONTRACT_ID` or `CONTRACT_ID` by default. Pass `contractId` to override. Uses `ROYALTY_TOKEN_ID`, `TOKEN_CONTRACT_ID`, or `TOKEN_ID` by default for the balance token. Pass `tokenId` to override.
+
+**Response:**
+
+```json
+{
+  "contractId": "C...",
+  "adminAddress": "G...",
+  "royaltyRate": 500,
+  "recipients": [
+    { "address": "G...", "basisPoints": 5000 },
+    { "address": "G...", "basisPoints": 5000 }
+  ],
+  "balance": "10000000",
+  "tokenId": "C...",
+  "network": "Testnet",
+  "networkPassphrase": "Test SDF Network ; September 2015"
+}
+```
+
 ### `GET /api/v1/contract/info`
 
-Returns the configured contract's current on-chain state for frontend initialization and operator dashboards.
+Returns the configured contract's current on-chain state for frontend initialization and operator dashboards. This legacy endpoint is not cached.
 
 Uses `ROYALTY_CONTRACT_ID` or `CONTRACT_ID` by default. Pass `contractId` to override. Uses `ROYALTY_TOKEN_ID`, `TOKEN_CONTRACT_ID`, or `TOKEN_ID` by default for the balance token. Pass `tokenId` to override.
 

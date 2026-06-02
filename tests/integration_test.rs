@@ -1420,10 +1420,29 @@ fn test_set_default_recipients_zero_share_panics() {
     client.set_default_recipients(&recipients);
 }
 
+/// Test that set_default_recipients rejects invalid basis-point values
+#[test]
+fn test_set_default_recipients_invalid_basis_points_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone()], &vec![&env, 10000_u32]);
+
+    let recipient = Recipient {
+        address: admin,
+        share: 10_001_u32,
+    };
+    let recipients = vec![&env, recipient];
+
+    let result = client.try_set_default_recipients(&recipients);
+    assert_eq!(result, Err(Ok(ContractError::InvalidBasisPoints)));
+}
+
 /// Test that set_default_recipients rejects duplicate addresses
 #[test]
-#[should_panic]
-fn test_set_default_recipients_duplicate_address_panics() {
+fn test_set_default_recipients_duplicate_address_returns_typed_error() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
     let (_, client) = setup(&env);
@@ -1445,7 +1464,11 @@ fn test_set_default_recipients_duplicate_address_panics() {
     };
     let recipients = vec![&env, recipient1, recipient2];
 
-    client.set_default_recipients(&recipients);
+    let result = client.try_set_default_recipients(&recipients);
+    assert_eq!(result, Err(Ok(ContractError::DuplicateRecipient)));
+
+    let defaults = client.get_default_recipients();
+    assert_eq!(defaults.len(), 0);
 }
 
 /// Test that set_default_recipients emits an event
@@ -2115,6 +2138,99 @@ fn test_get_admin_reflects_admin_transfer() {
 
     client.admin_transfer(&new_admin);
     assert_eq!(client.get_admin(), new_admin);
+}
+
+#[test]
+fn test_get_admin_remains_current_during_proposed_admin_transfer() {
+    let env = Env::default();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let pending_admin = Address::generate(&env);
+
+    env.mock_all_auths_allowing_non_root_auth();
+    client.initialize(
+        &vec![&env, admin.clone(), b.clone()],
+        &vec![&env, 5000_u32, 5000_u32],
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "propose_admin_transfer",
+            args: (&pending_admin,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.propose_admin_transfer(&pending_admin);
+
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_get_admin_reflects_accepted_admin_transfer() {
+    let env = Env::default();
+    let (contract_id, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let pending_admin = Address::generate(&env);
+
+    env.mock_all_auths_allowing_non_root_auth();
+    client.initialize(
+        &vec![&env, admin.clone(), b.clone()],
+        &vec![&env, 5000_u32, 5000_u32],
+    );
+
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "propose_admin_transfer",
+            args: (&pending_admin,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.propose_admin_transfer(&pending_admin);
+
+    env.mock_auths(&[MockAuth {
+        address: &pending_admin,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "accept_admin",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.accept_admin();
+
+    assert_eq!(client.get_admin(), pending_admin);
+}
+
+#[test]
+fn test_get_admin_updates_after_multiple_transfers() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_, client) = setup(&env);
+
+    let admin = Address::generate(&env);
+    let b = Address::generate(&env);
+    let intermediate_admin = Address::generate(&env);
+    let final_admin = Address::generate(&env);
+
+    client.initialize(
+        &vec![&env, admin.clone(), b.clone()],
+        &vec![&env, 5000_u32, 5000_u32],
+    );
+    assert_eq!(client.get_admin(), admin);
+
+    client.admin_transfer(&intermediate_admin);
+    assert_eq!(client.get_admin(), intermediate_admin);
+
+    client.admin_transfer(&final_admin);
+    assert_eq!(client.get_admin(), final_admin);
 }
 
 #[test]
