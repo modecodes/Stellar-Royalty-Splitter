@@ -1,0 +1,794 @@
+﻿# GITHUB ISSUES - STELLAR ROYALTY SPLITTER
+
+## FRONTEND (FE) - 5 Issues
+
+### 1. Add Frontend Unit Test Framework & Coverage
+**Labels:** frontend, testing, enhancement
+**Description:**
+**Problem:**
+- No unit test framework configured (Jest/Vitest) for React components
+- E2E tests exist but unit tests completely missing
+- Components like ErrorBoundary, WalletConnect, DistributeForm have no isolated test coverage
+
+**Solution:**
+- Set up Vitest with React Testing Library
+- Add unit tests for core components (ErrorBoundary, WalletConnect, InitializeForm, DistributeForm)
+- Configure coverage thresholds (target 80%+)
+- Integrate into CI/CD pipeline
+
+**Acceptance Criteria:**
+- [ ] Vitest + React Testing Library configured
+- [ ] 15+ unit tests written for core components
+- [ ] Coverage report shows >= 80% for src/components
+- [ ] Tests pass in CI/CD workflow
+- [ ] Documentation updated with test setup
+
+**Note for Contributors:**
+- Don't break existing E2E tests
+- Follow existing component patterns
+- Tests should be deterministic and not depend on wallet state
+
+---
+
+### 2. Implement Mobile Responsive Design & Validation
+**Labels:** frontend, UI/UX, bug
+**Description:**
+**Problem:**
+- Responsive design not fully validated on mobile devices
+- AdminDashboard and TransactionHistory may have layout issues on small screens
+- No mobile-specific testing in E2E suite
+
+**Solution:**
+- Audit all components for mobile responsiveness (320px to 768px viewports)
+- Fix layout issues in grid/table components
+- Add touch-friendly button sizing and spacing
+- Implement mobile-specific E2E tests
+
+**Acceptance Criteria:**
+- [ ] All components render correctly on mobile (320px, 480px, 768px)
+- [ ] Touch targets >= 44x44px
+- [ ] No horizontal scroll on mobile
+- [ ] 5+ E2E tests added for mobile viewports
+- [ ] Lighthouse accessibility score >= 90
+
+**Note for Contributors:**
+- Use Tailwind responsive classes (sm:, md:, lg:)
+- Test on real devices or Chrome DevTools emulation
+- Check TransactionHistory table truncation on small screens
+
+---
+
+### 3. Add Form Input Validation & Error Messages
+**Labels:** frontend, validation, enhancement
+**Description:**
+**Problem:**
+- DistributeForm and InitializeForm lack real-time input validation
+- Error messages from backend not always surfaced to user clearly
+- No feedback on invalid collaborator addresses or share percentages
+
+**Solution:**
+- Add real-time validation for all form inputs (Zod/Yup schema)
+- Show inline error messages with clear guidance
+- Validate collaborator addresses against Stellar format in real-time
+- Validate share percentages sum to 100% immediately
+
+**Acceptance Criteria:**
+- [ ] Real-time validation on all form inputs
+- [ ] Inline error messages displayed below invalid fields
+- [ ] Collaborator address format validated before submit
+- [ ] Share sum validation shows remaining % to allocate
+- [ ] Form prevents submission with validation errors
+- [ ] 8+ validation tests added
+
+**Note for Contributors:**
+- Reuse validation logic from backend (src/validation.js)
+- Don't submit forms until all validations pass
+- Show helpful error copy (e.g., "Shares must sum to 100%")
+
+---
+
+### 4. Implement Dark Mode Theme Toggle
+**Labels:** frontend, UI/UX, enhancement
+**Description:**
+**Problem:**
+- Theme context exists but dark mode toggle not accessible from UI
+- Settings page incomplete for theme management
+- No persistence of theme preference to localStorage
+
+**Solution:**
+- Add theme toggle button in Navigation header
+- Persist theme selection to localStorage
+- Update all Tailwind classes to support dark: variants
+- Test contrast ratios in both light and dark modes
+
+**Acceptance Criteria:**
+- [ ] Theme toggle button visible in Navigation
+- [ ] Theme persists on page reload
+- [ ] All components styled for dark mode
+- [ ] Contrast ratios pass WCAG AA in both modes
+- [ ] E2E test for theme toggle added
+
+**Note for Contributors:**
+- Use Tailwind's dark: prefix for styling
+- Default to system preference via prefers-color-scheme
+- Test with contrast checker tool
+
+---
+
+### 5. Add Loading States & Optimistic Updates to Distribution Flow
+**Labels:** frontend, UX, enhancement
+**Description:**
+**Problem:**
+- DistributeForm lacks loading indicators during transaction submission
+- No optimistic UI updates while waiting for Stellar confirmation
+- User doesn't know if transaction was received vs confirmed
+
+**Solution:**
+- Show loading spinner during transaction submission
+- Disable form inputs while submitting
+- Implement optimistic transaction state in context
+- Add transaction confirmation status badge
+- Show estimated time for confirmation
+
+**Acceptance Criteria:**
+- [ ] Loading spinner appears during form submit
+- [ ] Form inputs disabled while submitting
+- [ ] Transaction ID shown after submission
+- [ ] Confirmation status updated from pending → confirmed
+- [ ] 3+ E2E tests for loading states
+
+**Note for Contributors:**
+- Don't resubmit if already in-flight (check idempotency)
+- Show transaction hash for user verification
+- Handle timeout scenarios gracefully
+
+---
+
+## BACKEND (BE) - 5 Issues
+
+### 6. Implement Request Signature Verification (Ed25519)
+**Labels:** backend, security, critical
+**Description:**
+**Problem:**
+- No request signature verification between frontend and backend (HIGH-2 finding)
+- Vulnerable to CSRF attacks and request tampering
+- Any client could submit arbitrary distribution requests
+- Currently only CORS protects endpoints
+
+**Solution:**
+- Implement Ed25519 signing for all write operations (POST/PUT/DELETE)
+- Frontend signs requests with private key, backend verifies signature
+- Add signature header validation middleware
+- Create signing utility in frontend to sign JSON payloads
+- Add integration tests for signature verification
+
+**Acceptance Criteria:**
+- [ ] Signature middleware validates all write requests
+- [ ] Frontend signs initialize, distribute, and admin requests
+- [ ] Requests without valid signature rejected with 401
+- [ ] Signature validation tests added (5+ test cases)
+- [ ] Documentation updated with signing flow
+- [ ] Backwards compatibility maintained for existing clients (optional grace period)
+
+**Note for Contributors:**
+- Use @stellar/stellar-sdk Ed25519 utilities
+- Include nonce in signature to prevent replay attacks
+- Add timestamp validation (no signatures older than 5 minutes)
+- Mainnet blocker - coordinate with team before deployment
+
+---
+
+### 7. Add Multiple RPC Endpoint Failover
+**Labels:** backend, reliability, critical
+**Description:**
+**Problem:**
+- Single RPC endpoint dependency (HIGH-4 finding)
+- No fallback if Horizon becomes unavailable
+- RPC compromise could cause service failure
+- Health check doesn't verify RPC responsiveness
+
+**Solution:**
+- Configure multiple Horizon endpoints (primary + 2+ fallbacks)
+- Implement health-check polling for each endpoint
+- Auto-failover on timeout or error (< 100ms timeout)
+- Track endpoint health metrics
+- Update health endpoint to report RPC status
+
+**Acceptance Criteria:**
+- [ ] 3+ RPC endpoints configured (env vars)
+- [ ] Health check polls all endpoints every 30s
+- [ ] Auto-failover to next healthy endpoint on error
+- [ ] Metrics track failover events
+- [ ] 6+ integration tests for failover scenarios
+- [ ] Documentation updated with RPC configuration
+
+**Note for Contributors:**
+- Use exponential backoff for retry logic
+- Don't spam failed endpoints (circuit breaker)
+- Log all failover events for debugging
+- Test with RPC mocking to simulate failures
+
+---
+
+### 8. Add Comprehensive Input Validation & Pagination Bounds Checking
+**Labels:** backend, validation, enhancement
+**Description:**
+**Problem:**
+- Some endpoints missing bounds checking on pagination (MEDIUM-16 finding)
+- Numeric fields lack min/max validation
+- No rate limiting on analytics/history endpoints
+- Collaborator count could be queried at arbitrary scales
+
+**Solution:**
+- Add Zod validation schemas for all pagination inputs (limit max 100, default 10)
+- Validate numeric ranges on analytics queries
+- Add offset bounds checking
+- Implement per-endpoint rate limiting
+- Add validation tests for edge cases
+
+**Acceptance Criteria:**
+- [ ] Pagination schema validates limit: 1-100 (default 10)
+- [ ] Pagination schema validates offset: >= 0
+- [ ] Numeric fields have min/max constraints
+- [ ] Invalid pagination rejected with 400
+- [ ] 8+ validation test cases added
+- [ ] API documentation updated with constraints
+
+**Note for Contributors:**
+- Reuse existing Zod schemas where possible
+- Don't break existing clients (provide sensible defaults)
+- Add examples to API.md for pagination usage
+
+---
+
+### 9. Implement Database Write-Ahead Logging & Integrity Verification
+**Labels:** backend, database, enhancement
+**Description:**
+**Problem:**
+- Database integrity not cryptographically protected (MEDIUM-3 finding)
+- No write-ahead logging for crash recovery
+- Audit log entries not tamper-evident
+- Compromised backend could rewrite transaction history
+
+**Solution:**
+- Enable SQLite WAL (write-ahead logging) mode
+- Add SHA-256 hashing to audit log entries
+- Verify audit log integrity on startup
+- Implement database checkpoint strategy
+- Add integrity check tests
+
+**Acceptance Criteria:**
+- [ ] SQLite WAL mode enabled in production
+- [ ] Audit log entries include hash of previous entry (chain)
+- [ ] Startup verifies audit log chain integrity
+- [ ] Database checkpoint called on graceful shutdown
+- [ ] 4+ integrity verification tests
+- [ ] Documentation updated with backup strategy
+
+**Note for Contributors:**
+- Don't modify existing audit log without understanding hash chain
+- Test with intentional corruption to verify detection
+- Coordinate database changes with ops team
+
+---
+
+### 10. Add Comprehensive API Logging & Request Tracing
+**Labels:** backend, observability, enhancement
+**Description:**
+**Problem:**
+- Current logging missing request tracing across services
+- No correlation IDs for multi-step operations (initialize → distribute)
+- Hard to debug issues in production without request context
+- Analytics endpoint lacks detailed error logging
+
+**Solution:**
+- Add correlation ID middleware for all requests
+- Log request/response with correlation ID and timing
+- Add distributed tracing for Stellar RPC calls
+- Track latency percentiles (p50, p95, p99)
+- Export metrics to monitoring system
+
+**Acceptance Criteria:**
+- [ ] Correlation ID generated for each request
+- [ ] All logs include correlation ID context
+- [ ] Response times tracked and exported as metrics
+- [ ] Stellar RPC calls traced with correlation ID
+- [ ] 3+ observability tests added
+- [ ] Grafana dashboard examples provided
+
+**Note for Contributors:**
+- Use Winston context (not global variables)
+- Correlation ID format: uuid v4
+- Include request/response size in logs for debugging
+
+---
+
+## BUG FIXES - 5 Issues
+
+### 11. Fix Idempotency Key Collision on Rapid Re-submission
+**Labels:** backend, bug, critical
+**Description:**
+**Problem:**
+- Idempotency cache uses simple key (contractId + amount)
+- Two identical distribution requests within 24hr window collide
+- Second valid request rejected as duplicate
+- No deduplication of transaction hashes
+
+**Solution:**
+- Update idempotency key to include request hash (not just amount)
+- Add request body signature to idempotency key
+- Implement per-user idempotency key tracking
+- Add cache collision tests
+
+**Acceptance Criteria:**
+- [ ] Idempotency key now includes request body hash
+- [ ] Two identical requests to different accounts don't collide
+- [ ] Same request resubmitted within TTL returns cached response
+- [ ] 4+ collision scenario tests added
+- [ ] Cache key format documented
+
+**Note for Contributors:**
+- Don't remove existing idempotency cache (24hr TTL still applies)
+- Test with duplicate requests from different users
+- Verify that cache hits return same transaction hash
+
+---
+
+### 12. Fix Secondary Royalty Pool Dust Handling
+**Labels:** smart-contract, bug, enhancement
+**Description:**
+**Problem:**
+- Secondary royalty pool accumulates dust from rounding
+- Dust not distributed to collaborators
+- Pool balance drifts over time with many small transactions
+- No mechanism to sweep dust into next distribution
+
+**Solution:**
+- Implement dust accumulation tracking in database
+- Distribute dust with next royalty batch
+- Add dust field to distribution records
+- Calculate actual vs theoretical amounts
+
+**Acceptance Criteria:**
+- [ ] Dust tracked per distribution cycle
+- [ ] Dust distributed in next batch (added to existing amounts)
+- [ ] Database schema updated with dust field
+- [ ] 3+ dust handling tests added
+- [ ] Analytics dashboard shows dust accumulation
+
+**Note for Contributors:**
+- Test with very small amounts to trigger rounding
+- Verify dust doesn't exceed 1 basis point
+- Document rounding strategy
+
+---
+
+### 13. Fix Contract State Cache Invalidation on Admin Transfer
+**Labels:** backend, bug, enhancement
+**Description:**
+**Problem:**
+- Contract state cache (30s TTL) not invalidated on admin transfer
+- Health endpoint returns stale admin address
+- Concurrent requests might see different admin state
+- No cache invalidation hook for admin operations
+
+**Solution:**
+- Add cache invalidation trigger on admin_transfer events
+- Implement event listener for admin change
+- Update health check to verify admin matches contract
+- Add state consistency tests
+
+**Acceptance Criteria:**
+- [ ] Cache invalidated immediately on admin transfer
+- [ ] Health endpoint reflects new admin within 100ms
+- [ ] No stale admin addresses returned
+- [ ] 3+ cache invalidation tests
+- [ ] Event listener logs admin changes
+
+**Note for Contributors:**
+- Don't break existing 30s cache for other state
+- Test concurrent requests during admin transfer
+- Verify Webhook delivery still works
+
+---
+
+### 14. Fix Error Response Format Inconsistency
+**Labels:** backend, bug, enhancement
+**Description:**
+**Problem:**
+- Some errors return {error: string} while others return {code, message, details}
+- Error codes not standardized (mix of HTTP status and custom codes)
+- Frontend error handling expects consistent format
+- Validation errors lack field-level granularity
+
+**Solution:**
+- Standardize all error responses to {code, message, details, timestamp}
+- Define error code enum (VALIDATION_ERROR, AUTH_ERROR, etc.)
+- Update error-response.js to enforce format
+- Add field-level error details for validation
+
+**Acceptance Criteria:**
+- [ ] All error responses use standard format
+- [ ] Error codes defined in enum (15+ codes)
+- [ ] Validation errors include field names and constraints
+- [ ] 5+ error format tests added
+- [ ] Frontend updated to handle new format
+- [ ] API.md documents error response format
+
+**Note for Contributors:**
+- Maintain backwards compatibility where possible
+- Log which endpoints are updated
+- Test with frontend error boundary
+
+---
+
+### 15. Fix Race Condition in Webhook Delivery Confirmation
+**Labels:** backend, bug, critical
+**Description:**
+**Problem:**
+- Webhook marked delivered before confirmation received
+- Network timeout causes webhook to be skipped (never retried)
+- Distribution event lost if webhook service unreachable
+- No exponential backoff retry strategy
+
+**Solution:**
+- Wait for successful HTTP response before marking delivered
+- Implement exponential backoff (1s, 2s, 4s, 8s max)
+- Mark webhook as failed after 3 retries
+- Add dead-letter queue for failed webhooks
+- Implement webhook retry scheduler
+
+**Acceptance Criteria:**
+- [ ] Webhook marked delivered only after 2xx response
+- [ ] Exponential backoff implemented (3 retries)
+- [ ] Failed webhooks logged to dead-letter queue
+- [ ] Retry scheduler runs every 5 minutes
+- [ ] 4+ webhook retry tests added
+- [ ] Webhook status tracking added to DB
+
+**Note for Contributors:**
+- Test with mocked webhook endpoints
+- Simulate network timeouts and errors
+- Verify webhook delivery order preserved
+
+---
+
+## SMART CONTRACT - 5 Issues
+
+### 16. Implement Time-Lock on Admin Transfer
+**Labels:** smart-contract, security, critical
+**Description:**
+**Problem:**
+- Admin can transfer rights immediately (HIGH-1 finding)
+- No delay enables instant compromise on key theft
+- dmin_transfer function bypasses security delay
+- No warning period for affected collaborators
+
+**Solution:**
+- Add 48-hour time-lock on admin transfers
+- Implement propose/accept pattern: propose_admin_transfer + accept_admin_transfer
+- Store proposed admin with timestamp in contract state
+- Add function to cancel proposed transfer
+- Emit events for proposal and acceptance
+
+**Acceptance Criteria:**
+- [ ] propose_admin_transfer(new_admin) stores proposal with timestamp
+- [ ] ccept_admin_transfer verifies 48-hour delay passed
+- [ ] cancel_admin_proposal() available to current admin
+- [ ] Attempting early accept rejected with error
+- [ ] 5+ time-lock scenario tests
+- [ ] Contract version bumped
+
+**Note for Contributors:**
+- Requires contract state changes (migration plan)
+- Update frontend to show countdown timer
+- Backend must handle both immediate and time-locked transfers
+- This is Mainnet blocker
+
+---
+
+### 17. Implement Commit-Reveal Scheme for Initialization
+**Labels:** smart-contract, security, critical
+**Description:**
+**Problem:**
+- No front-running protection on initialize (HIGH-3 finding)
+- Unauthorized admin could initialize before real admin (race condition)
+- No commit-reveal prevents malicious initialization
+- Collaborator list could be intercepted and modified
+
+**Solution:**
+- Implement commit-reveal pattern:
+  - commit_initialize(collaborators_hash, shares_hash) - stores hash
+  - reveal_initialize(collaborators, shares) - verifies hash and initializes
+- Add delay between commit and reveal (1 block)
+- Revert reveal if commit hash doesn't match
+- Add nonce to prevent replay
+
+**Acceptance Criteria:**
+- [ ] commit_initialize(hash1, hash2) stores hashes
+- [ ] eveal_initialize(collabs, shares) verifies and initializes
+- [ ] Reveal fails if hash mismatch
+- [ ] Reveal must be after commit + 1 block
+- [ ] 6+ commit-reveal scenario tests
+- [ ] Frontend guides user through 2-step process
+
+**Note for Contributors:**
+- Uses Soroban's current block number for delay
+- Update frontend to show commit pending state
+- Backend must coordinate 2-step flow
+- Mainnet blocker
+
+---
+
+### 18. Add Multi-Signature Admin Enforcement by Default
+**Labels:** smart-contract, security, enhancement
+**Description:**
+**Problem:**
+- Multi-sig support exists but not enforced (HIGH-1 finding)
+- Single admin key remains single point of failure
+- No default multi-sig threshold on initialization
+- Existing contracts still single-admin
+
+**Solution:**
+- Update initialize to accept optional admin_threshold
+- Default to 2-of-3 multi-sig for new initializations
+- Implement set_admins(admin_list, threshold) with validation
+- Add get_admins() and get_admin_threshold() queries
+- Store admin list and threshold in contract state
+
+**Acceptance Criteria:**
+- [ ] initialize accepts optional admin_threshold (default 2-of-3)
+- [ ] set_admins(admins, threshold) validates list size vs threshold
+- [ ] Multi-sig checked for all admin operations
+- [ ] get_admins() returns current admin configuration
+- [ ] 7+ multi-sig validation tests
+- [ ] Contract version bumped
+
+**Note for Contributors:**
+- Backwards compatible with existing single-admin contracts
+- Frontend must show current admin threshold
+- Document multi-sig key management best practices
+- Mainnet blocker
+
+---
+
+### 19. Add Event Versioning & Ordering Guarantees
+**Labels:** smart-contract, enhancement
+**Description:**
+**Problem:**
+- Contract events lack versioning (LOW-2 finding)
+- No event ordering guarantees across multiple transactions
+- Events could be missed if contract upgraded
+- Off-chain processors break on contract updates
+
+**Solution:**
+- Add event_version field to all events (v1, v2, etc.)
+- Include sequence or 	x_index in events for ordering
+- Emit events before state changes where possible
+- Maintain event schema changelog in documentation
+- Add event versioning to contract upgrade guide
+
+**Acceptance Criteria:**
+- [ ] All events include event_version field
+- [ ] Events include ledger sequence for ordering
+- [ ] Event schema changelog documented
+- [ ] 4+ event version compatibility tests
+- [ ] Upgrade guide covers event versioning
+- [ ] Contract version bumped
+
+**Note for Contributors:**
+- Events emitted before state changes (atomicity)
+- Test with multiple concurrent transactions
+- Verify event order in test snapshots
+
+---
+
+### 20. Implement Emergency Pause Mechanism for Collaborators
+**Labels:** smart-contract, enhancement
+**Description:**
+**Problem:**
+- Only admin can pause contract (not collaborators)
+- No emergency stop for compromised contract or exploit
+- Pause function exists but limited accessibility
+- No time-bound pause with auto-unpause
+
+**Solution:**
+- Add pause_collaborator_distributions() for any collaborator
+- Implement emergency pause with 24-hour auto-unpause
+- Require multi-sig (2-of-3 admin) to override pause
+- Track pause source and reason
+- Emit pause event with collaborator address
+
+**Acceptance Criteria:**
+- [ ] Any collaborator can call pause_collaborator_distributions()
+- [ ] Pause automatically expires after 24 hours
+- [ ] Multi-sig required to manually unpause before 24hr
+- [ ] Pause source tracked in event
+- [ ] 5+ pause scenario tests
+- [ ] Frontend shows pause countdown
+
+**Note for Contributors:**
+- Use block timestamp for 24-hour calculation
+- Document pause trigger in API
+- Test with partial pauses (some collaborators)
+
+---
+
+## TESTING - 5 Issues
+
+### 21. Set Up Frontend E2E Test Execution in CI/CD
+**Labels:** frontend, testing, enhancement
+**Description:**
+**Problem:**
+- 18 E2E tests configured but don't run in CI/CD
+- Playwright browsers not installed in CI environment
+- No test report artifacts
+- Tests only run locally after manual setup
+
+**Solution:**
+- Add Playwright setup to GitHub Actions workflow
+- Install Chromium/Firefox browsers in CI
+- Run tests against deployed staging environment
+- Generate HTML test report artifacts
+- Add test summary to PR comments
+
+**Acceptance Criteria:**
+- [ ] Playwright browsers installed in CI
+- [ ] E2E tests run on every PR
+- [ ] Test results reported with pass/fail count
+- [ ] HTML report uploaded as artifact
+- [ ] Tests must pass before merge (required status check)
+- [ ] Test runs complete in < 5 minutes
+
+**Note for Contributors:**
+- Use staging network for tests
+- Don't rely on specific contract state between runs
+- Mock Stellar RPC if needed for speed
+- Archive HTML reports for 30 days
+
+---
+
+### 22. Add Contract Fuzz Testing & Property-Based Tests
+**Labels:** smart-contract, testing, enhancement
+**Description:**
+**Problem:**
+- Existing tests comprehensive but limited fuzz coverage
+- No property-based testing for rounding/distribution math
+- Edge cases with extreme amounts not tested
+- No stress testing for batch operations
+
+**Solution:**
+- Add proptest framework to contract tests
+- Generate random collaborator lists, shares, and amounts
+- Verify invariants: total distributed = amount sent, no funds lost
+- Test with extreme values (1 lamport, u128::MAX)
+- Add 50+ property-based test scenarios
+
+**Acceptance Criteria:**
+- [ ] Proptest framework integrated
+- [ ] 50+ randomized test scenarios generated
+- [ ] All invariants verified for each scenario
+- [ ] Tests run in < 1 minute
+- [ ] No panics on extreme inputs
+- [ ] Fuzz test results included in CI report
+
+**Note for Contributors:**
+- Don't slow down tests significantly
+- Document invariants being tested
+- Seed fuzzer with known regression cases
+
+---
+
+### 23. Add Backend Load Testing & Performance Benchmarks
+**Labels:** backend, testing, performance
+**Description:**
+**Problem:**
+- No load testing for production readiness
+- Unknown API performance under concurrent load
+- No baseline for performance regression detection
+- Database query performance not benchmarked
+
+**Solution:**
+- Add k6 or Artillery load testing script
+- Test distribute endpoint with 100 concurrent users
+- Benchmark database queries (collaborators, history, analytics)
+- Set SLA targets (p95 < 200ms, p99 < 500ms)
+- Add load test to CI pre-deployment
+
+**Acceptance Criteria:**
+- [ ] Load test script created (k6 or Artillery)
+- [ ] Tests simulate 100 concurrent distribute requests
+- [ ] p95 latency < 200ms, p99 < 500ms
+- [ ] Database queries benchmark documented
+- [ ] Performance baseline recorded
+- [ ] Load test runs in CI (optional, not blocking)
+
+**Note for Contributors:**
+- Use realistic data sizes
+- Test with real RPC calls (or mocked)
+- Document environment specs for reproducibility
+
+---
+
+### 24. Add Contract Snapshot Testing for Storage State
+**Labels:** smart-contract, testing, enhancement
+**Description:**
+**Problem:**
+- Contract state changes not snapshot tested
+- No regression detection for state transitions
+- Upgrade scenarios not fully validated
+- Storage layout changes could break compatibility
+
+**Solution:**
+- Implement snapshot testing for contract state after operations
+- Snapshot state after initialize, distribute, admin_transfer
+- Compare snapshots on contract upgrade
+- Add regression detection for state serialization
+- Document snapshot update process
+
+**Acceptance Criteria:**
+- [ ] Snapshots captured for 10+ state transitions
+- [ ] Snapshot comparisons in CI
+- [ ] Upgrade scenarios validated against snapshots
+- [ ] Process documented for updating snapshots
+- [ ] 3+ snapshot regression tests
+- [ ] Failed snapshots block PR
+
+**Note for Contributors:**
+- Use soroban-sdk snapshot utilities
+- Don't commit snapshot changes without review
+- Document why snapshot changed if intentional
+
+---
+
+### 25. Add Integration Test Suite for Backend + Contract
+**Labels:** backend, smart-contract, testing
+**Description:**
+**Problem:**
+- Backend and contract tested separately
+- No end-to-end flow testing (initialize → distribute → verify)
+- Contract state changes not verified via backend
+- Integration bugs between layers not caught
+
+**Solution:**
+- Create integration test suite that deploys contract + backend
+- Test full flow: backend calls build_xdr → sign → submit → verify
+- Verify contract state matches backend database
+- Test error scenarios (failed txs, timeouts, rejects)
+- Add 8+ integration scenarios
+
+**Acceptance Criteria:**
+- [ ] Integration tests deploy fresh contract
+- [ ] Full initialize flow tested end-to-end
+- [ ] Full distribute flow tested with verification
+- [ ] Contract state verified against backend DB
+- [ ] 8+ integration scenarios covered
+- [ ] Tests run in CI (separate job, ~5min)
+- [ ] Failures provide clear debugging info
+
+**Note for Contributors:**
+- Use testnet for integration tests
+- Clean up deployed contracts after tests
+- Mock Stellar RPC responses where needed
+- Document setup requirements
+
+---
+
+# SUMMARY
+
+**Frontend (FE):** 5 issues
+- Unit tests, responsive design, form validation, dark mode, loading states
+
+**Backend (BE):** 5 issues  
+- Request signing, RPC failover, input validation, database WAL, request tracing
+
+**Bug Fixes:** 5 issues
+- Idempotency collisions, secondary royalty dust, cache invalidation, error format, webhook delivery
+
+**Smart Contract:** 5 issues
+- Time-lock admin, commit-reveal init, multi-sig enforcement, event versioning, emergency pause
+
+**Testing:** 5 issues
+- E2E CI/CD, contract fuzz testing, backend load testing, snapshot testing, integration tests
+
+**Total: 25 Unique Issues**
