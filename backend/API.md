@@ -134,6 +134,22 @@ The distribute endpoint supports idempotency to prevent duplicate transaction su
 3. Cached responses are automatically expired after 24 hours
 4. Only successful responses (2xx status codes) are cached
 
+**Cache key format:**
+
+The cache key is a composite of the user's wallet address and a SHA-256 hash of the full request body, not the raw `Idempotency-Key` header value. This prevents collisions between different legitimate requests whose clients happen to derive their keys from overlapping fields (e.g. just `contractId` + `amount`).
+
+```
+{walletAddress}:{sha256-hex-of-stable-json-body}
+```
+
+Components:
+- **walletAddress** — Per-user scope extracted from `req.body.walletAddress`. Falls back to `"unknown"` when not present.
+- **sha256** — SHA-256 hex digest of the full request body serialized with stable (sorted-key) JSON. Object keys are sorted lexicographically so the same logical object always produces the same hash.
+
+**Prevents these collision scenarios:**
+- Two requests with the same `contractId` + `amount` but different `tokenId` or other body fields produce different cache keys (body hash differs).
+- Two identical requests from different wallet addresses produce different cache keys (wallet prefix differs).
+
 **Example:**
 
 ```bash
