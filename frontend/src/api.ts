@@ -123,8 +123,8 @@ async function post<T>(
   });
 }
 
-async function get<T>(path: string): Promise<T> {
-  return request<T>(path);
+async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return request<T>(path, signal ? { signal } : undefined);
 }
 
 export interface TransactionRecord {
@@ -249,9 +249,10 @@ export const api = {
       pagination: { limit: number; offset: number; total: number };
     }>(`/history/${contractId}?limit=${limit}&offset=${offset}`),
 
-  getTransactionDetails: (txHash: string) =>
+  getTransactionDetails: (txHash: string, signal?: AbortSignal) =>
     get<{ success: boolean; data: TransactionDetails }>(
       `/transaction/${txHash}`,
+      signal,
     ),
 
   confirmTransaction: (

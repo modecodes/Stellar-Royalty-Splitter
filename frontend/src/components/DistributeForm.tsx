@@ -4,6 +4,7 @@ import { getContractAddressError, isValidContractAddress } from "../lib/stellar-
 import { signAndSubmitTransaction } from "../stellar";
 import { useNetwork } from "../context/NetworkContext";
 import { useTransaction, useIsTransactionInFlight } from "../context/TransactionContext";
+import { useTransactionPolling } from "../hooks/useTransactionPolling";
 import FormStatus from "./FormStatus";
 import TransactionStatusBadge from "./TransactionStatusBadge";
 import { useFormStatus } from "../hooks/useFormStatus";
@@ -60,6 +61,8 @@ export default function DistributeForm({
   const { network } = useNetwork();
   const { current: txEntry, beginTransaction, updatePhase, reset: resetTx } = useTransaction();
   const isInFlight = useIsTransactionInFlight();
+  // #414: real-time confirmation polling (5s interval, 60s timeout, aborts on unmount).
+  const { poll: pollTransaction } = useTransactionPolling();
 
   const [tokenId, setTokenId] = useState("");
   const [amount, setAmount] = useState("");
@@ -208,23 +211,53 @@ export default function DistributeForm({
 
       const hash = await signAndSubmitTransaction(res.xdr, network);
 
-      // #391: Phase 3 — confirming, with countdown
+      // #391/#414: Phase 3 — confirming, with countdown + real-time polling.
       updatePhase("confirming", { txHash: hash });
 
-      await api.confirmTransaction(hash, {
-        status: "confirmed",
-        blockTime: new Date().toISOString(),
-        transactionId: res.transactionId,
-      });
+      // Kick off server-side settlement (Horizon polling + webhooks). We don't
+      // block on it — the polling loop below reflects status in real time and
+      // enforces the 60s client-side timeout independently.
+      void api
+        .confirmTransaction(hash, {
+          status: "confirmed",
+          blockTime: new Date().toISOString(),
+          transactionId: res.transactionId,
+        })
+        .catch(() => {
+          // Settlement errors surface through the polled status / timeout.
+        });
 
-      // #391: Phase 4 — confirmed
-      updatePhase("confirmed");
+      // #414: poll GET /transaction/:hash every 5s until terminal or 60s.
+      const outcome = await pollTransaction(hash);
 
-      setStatus("ok", "Distributed successfully.");
-      localStorage.removeItem(draftKey);
-      setTokenId("");
-      setAmount("");
-      onSuccess();
+      // Component unmounted mid-poll — nothing to update.
+      if (outcome === "aborted") return;
+
+      if (outcome === "confirmed") {
+        // #391: Phase 4 — confirmed
+        updatePhase("confirmed");
+        setStatus("ok", "Distributed successfully.");
+        localStorage.removeItem(draftKey);
+        setTokenId("");
+        setAmount("");
+        onSuccess();
+        return;
+      }
+
+      if (outcome === "timeout") {
+        updatePhase("timeout", {
+          error: "Confirmation timed out. The transaction may still settle.",
+        });
+        setStatus(
+          "error",
+          "Confirmation timed out. Check the transaction status shortly.",
+        );
+        return;
+      }
+
+      // outcome === "failed"
+      updatePhase("failed", { error: "Transaction failed to confirm." });
+      setStatus("error", "Transaction failed to confirm.");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Unknown error";
       const isTimeout =
