@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import DistributeForm from "./DistributeForm";
 import { api } from "../api";
+import { TransactionProvider } from "../context/TransactionContext";
 
 vi.mock("../context/NetworkContext", () => ({
   useNetwork: () => ({
@@ -23,6 +24,14 @@ vi.mock("../stellar", () => ({
   signAndSubmitTransaction: vi.fn().mockResolvedValue("signed-hash"),
 }));
 
+function renderDistributeForm() {
+  return render(
+    <TransactionProvider>
+      <DistributeForm contractId="test-contract" walletAddress="test-wallet" onSuccess={vi.fn()} />
+    </TransactionProvider>,
+  );
+}
+
 describe("DistributeForm", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -39,9 +48,7 @@ describe("DistributeForm", () => {
       JSON.stringify({ tokenId: "C" + "A".repeat(55), amount: "15" }),
     );
 
-    render(
-      <DistributeForm contractId="test-contract" walletAddress="test-wallet" onSuccess={vi.fn()} />,
-    );
+    renderDistributeForm();
 
     expect(await screen.findByText(/Restore previous session\?/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Restore/i })).toBeInTheDocument();
@@ -55,9 +62,7 @@ describe("DistributeForm", () => {
 
     (api.getCollaborators as unknown as vi.Mock).mockResolvedValue(mockCollaborators);
 
-    render(
-      <DistributeForm contractId="test-contract" walletAddress="test-wallet" onSuccess={vi.fn()} />,
-    );
+    renderDistributeForm();
 
     await waitFor(() => expect(api.getCollaborators).toHaveBeenCalledWith("test-contract"));
 
@@ -74,9 +79,7 @@ describe("DistributeForm", () => {
   });
 
   test("shows a contract-address validation error when the token address is malformed", async () => {
-    render(
-      <DistributeForm contractId="test-contract" walletAddress="test-wallet" onSuccess={vi.fn()} />,
-    );
+    renderDistributeForm();
 
     fireEvent.change(screen.getByLabelText(/Token contract address/i), {
       target: { value: "invalid-token" },
@@ -89,9 +92,7 @@ describe("DistributeForm", () => {
     (api.getCollaborators as unknown as vi.Mock).mockResolvedValue([]);
     (api.getContractBalance as unknown as vi.Mock).mockResolvedValue({ balance: "5" });
 
-    render(
-      <DistributeForm contractId="test-contract" walletAddress="test-wallet" onSuccess={vi.fn()} />,
-    );
+    renderDistributeForm();
 
     fireEvent.change(screen.getByLabelText(/Token contract address/i), {
       target: { value: "C" + "A".repeat(55) },

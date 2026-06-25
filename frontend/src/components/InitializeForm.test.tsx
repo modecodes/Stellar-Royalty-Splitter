@@ -21,7 +21,7 @@ describe("InitializeForm", () => {
 
     expect(screen.getByPlaceholderText(/Wallet address \(G\.\.\./i)).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/% \(0–100\)/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Initialize contract/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Commit initialization/i })).toBeDisabled();
   });
 
   test("shows address validation error for invalid Stellar addresses", () => {
@@ -34,7 +34,7 @@ describe("InitializeForm", () => {
     fireEvent.blur(addressInput);
 
     expect(screen.getByText(/Must be a valid Stellar address/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Initialize contract/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Commit initialization/i })).toBeDisabled();
   });
 
   test("shows percentage validation error for too large values", () => {
@@ -47,7 +47,7 @@ describe("InitializeForm", () => {
     fireEvent.blur(percentInput);
 
     expect(screen.getByText(/Percentage must be between 0 and 100/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Initialize contract/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Commit initialization/i })).toBeDisabled();
   });
 
   test("adds a second collaborator row when Add collaborator is clicked", () => {
