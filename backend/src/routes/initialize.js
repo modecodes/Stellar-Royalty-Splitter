@@ -12,6 +12,7 @@ import {
   commitInitializeSchema,
   revealInitializeSchema,
   validateInitializePayloadSize,
+  validateRoyaltySplitMiddleware,
 } from "../validation.js";
 import { buildAndRecordTransaction } from "./_shared.js";
 import { createRequestLogger } from "../logger.js";
@@ -33,6 +34,7 @@ async function ensureNotInitialized(contractId, res, log) {
 initializeRouter.post(
   "/",
   validateInitializePayloadSize,
+  validateRoyaltySplitMiddleware,
   validate(initializeSchema),
   async (req, res, next) => {
     const log = createRequestLogger(req);

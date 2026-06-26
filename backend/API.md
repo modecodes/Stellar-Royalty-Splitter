@@ -74,11 +74,16 @@ Invalid or missing signatures return `401`.
 
 Build an unsigned `initialize` transaction XDR.
 
-**Body:** `{ contractId, walletAddress, collaborators, shares }`
+**Body:** `{ contractId, walletAddress, collaborators, shares }` OR `{ contractId, walletAddress, recipients: [{ address, percentage }] }`
+
+**Validation Middleware (#228):**
+All initialize and royalty split payloads pass through request validation middleware before reaching contract processing. The middleware verifies that:
+- All recipient addresses are valid Stellar public keys (`G...`)
+- Revenue allocations sum to exactly `100%` (or `10,000` basis points)
 
 **Response:** `{ xdr, transactionId }`
 
-Initialize requests are rejected before contract processing when the request body is too large or when the serialized `collaborators` array exceeds the initialize payload guard.
+Initialize requests are rejected before contract processing when validation fails, when the request body is too large, or when the serialized `collaborators` array exceeds the initialize payload guard.
 
 **Oversized payload response:** `413 Payload Too Large`
 
