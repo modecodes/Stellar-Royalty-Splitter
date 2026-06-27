@@ -72,6 +72,7 @@ initializeRouter.post(
         correlationId: req.correlationId,
       });
 
+      invalidateCollaboratorsCache(contractId);
       log.info("initialize transaction built", { contractId, transactionId });
       res.json({ xdr, transactionId });
     } catch (err) {
@@ -142,6 +143,7 @@ initializeRouter.post(
         correlationId: req.correlationId,
       });
 
+      invalidateCollaboratorsCache(contractId);
       res.json({ xdr, transactionId, phase: "reveal" });
     } catch (err) {
       if (err.status) return res.status(err.status).json({ error: err.message });
