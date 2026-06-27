@@ -19,14 +19,17 @@ await jest.unstable_mockModule("../src/stellar.js", () => ({
   bytesN32HexToScVal: jest.fn((h) => h),
   server: {},
   networkPassphrase: "Test SDF Network ; September 2015",
+  getNetworkLabel: jest.fn(() => "Testnet"),
 }));
 
 const recordTransaction = jest.fn(() => "tx-123");
 const addAuditLog = jest.fn();
+const recordNonceIfNew = jest.fn(() => true);
 
 await jest.unstable_mockModule("../src/database/index.js", () => ({
   recordTransaction,
   addAuditLog,
+  recordNonceIfNew,
   initializeDatabase: jest.fn(),
   getMigrationVersion: jest.fn(() => 1),
 }));

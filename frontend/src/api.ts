@@ -203,6 +203,7 @@ export const api = {
     walletAddress: string;
     collaborators: string[];
     shares: number[];
+    nonce?: string;
   }) =>
     post<{ xdr: string; transactionId: number }>(
       "/initialize",

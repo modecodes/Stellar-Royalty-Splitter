@@ -80,10 +80,32 @@ Build an unsigned `initialize` transaction XDR.
 All initialize and royalty split payloads pass through request validation middleware before reaching contract processing. The middleware verifies that:
 - All recipient addresses are valid Stellar public keys (`G...`)
 - Revenue allocations sum to exactly `100%` (or `10,000` basis points)
+**Body:** `{ contractId, walletAddress, collaborators, shares, nonce? }`
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `nonce` | string (optional) | UUID v4. When provided, permanently deduplicates this request per contract (#421) — see below. |
 
 **Response:** `{ xdr, transactionId }`
 
 Initialize requests are rejected before contract processing when validation fails, when the request body is too large, or when the serialized `collaborators` array exceeds the initialize payload guard.
+
+**Request deduplication by nonce (#421):**
+
+`nonce` is distinct from the `Idempotency-Key` header used on `/distribute`:
+
+- **`Idempotency-Key`** (see Distribute below) caches the *response* for a TTL window (default 24h) and *replays* it on a repeated request with the same key.
+- **`nonce`** is *permanently* recorded per `(contractId, nonce)` pair. A second request reusing the same nonce for the same contract is rejected outright — it is never re-processed and the original response is never replayed. This lets a client distinguish an intentional retry (reuse a nonce on purpose to confirm rejection) from an accidental duplicate submission, without relying on a cache TTL.
+
+If `(contractId, nonce)` has already been seen, the request is rejected before any transaction is built or recorded:
+
+**Response:** `409 Conflict`
+
+```json
+{ "error": "A request with this nonce has already been processed for this contract." }
+```
+
+The same `nonce` value may be reused across *different* contracts — the uniqueness constraint is scoped to `(contractId, nonce)`, not `nonce` alone. Generate a nonce on the frontend with `crypto.randomUUID()` (see `frontend/src/lib/request-nonce.ts`).
 
 **Oversized payload response:** `413 Payload Too Large`
 
@@ -205,11 +227,24 @@ The endpoint only calls Soroban RPC simulation. It does not submit the transacti
 
 Returns on-chain collaborator addresses and shares.
 
+Cached in memory for 5 minutes (#422) — far longer than the 30s contract-state cache, since collaborator shares are effectively immutable once a contract is initialized. Cache key format: `contract:{network}:{contractId}:collaborators`. The cache is invalidated immediately whenever `/api/v1/initialize` or `/api/v1/initialize/reveal` successfully builds a transaction for that contract, rather than relying solely on the 5-minute TTL to pick up the new collaborator list.
+
+## Caching strategy (#422)
+
+| Cache | TTL | Key format | Invalidation |
+| ----- | --- | ---------- | ------------- |
+| Contract state (`GET /contract/state`) | 30s | `contract:{network}:{contractId}:state:{tokenId}` | TTL only — state (balance, royalty rate) can change at any time, so a short TTL is the primary defense. |
+| Collaborator list (`GET /collaborators/:contractId`) | 5min | `contract:{network}:{contractId}:collaborators` | TTL, plus explicit invalidation on successful initialize/reveal for that contract. |
+
+Both caches are in-memory `Map`s local to a single backend process (no Redis/shared cache layer). Cache hit/miss counts are exposed on the `/metrics` endpoint as `stellar_cache_hits_total{cache="..."}` / `stellar_cache_misses_total{cache="..."}` with `cache` values `contract_state` and `collaborators`.
+
 ## Contract
 
 ### `GET /api/v1/contract/state`
 
-Returns the configured contract's current state for frontend displays: admin address, royalty rate, recipient shares, token balance, and network details. Responses are cached for 30 seconds to reduce Soroban RPC calls.
+Returns the configured contract's current state for frontend displays: admin address, royalty rate, recipient shares, token balance, and network details. Responses are cached in memory for 30 seconds to reduce Soroban RPC calls.
+
+Cache key format: `contract:{network}:{contractId}:state:{tokenId}` (#422). The network segment is included because the same `contractId` string can be queried against both testnet and mainnet; without it, those two distinct on-chain states would alias to the same cache entry.
 
 Uses `ROYALTY_CONTRACT_ID` or `CONTRACT_ID` by default. Pass `contractId` to override. Uses `ROYALTY_TOKEN_ID`, `TOKEN_CONTRACT_ID`, or `TOKEN_ID` by default for the balance token. Pass `tokenId` to override.
 
@@ -283,6 +318,8 @@ Exposes:
 - `stellar_transactions_failed_total`
 - `stellar_horizon_response_time_average_ms`
 - `stellar_horizon_response_time_count`
+- `stellar_cache_hits_total{cache="..."}` (#422)
+- `stellar_cache_misses_total{cache="..."}` (#422)
 
 ## Local Seed
 
@@ -514,3 +551,71 @@ Hot-reload the server signing key without redeploying the backend (#293). The in
 | `RATE_LIMIT_ADMIN_MAX` | `5` | Per-IP rate limit for admin routes (per minute) |
 
 Key rotation events are written to structured logs (`signing_key_rotated`) with previous and new **public** keys only — secret material is never logged.
+
+## Admin — API keys & per-key rate limiting (#420)
+
+Per-IP rate limiting (`generalLimiter`, `writeLimiter`, etc. — see Operational configuration) is shared across every client behind the same IP, so a single bad actor can exhaust another tenant's quota, and there's no way to give a programmatic/API-key client its own independent quota. API keys solve this: each key gets its own sliding-window rate limit, tracked separately from the IP-based limiters (both apply — the API-key limit is additive, not a replacement).
+
+### `POST /admin/generate-key`
+
+Issue a new API key. **The raw key is only ever returned in this response** — only its SHA-256 hash is persisted, so it can never be retrieved again. If it's lost, revoke it and generate a new one.
+
+**Authentication:** `Authorization: Bearer <ADMIN_ROTATE_TOKEN>` (same token as `/admin/rotate-key`)
+
+**Body (JSON):** `{ "label"?: string }` (max 100 characters)
+
+**Response:**
+
+```json
+{
+  "id": 1,
+  "apiKey": "srs_9f2c...",
+  "label": "ci-bot",
+  "createdAt": "2026-05-30T12:00:00.000Z"
+}
+```
+
+### `GET /admin/keys`
+
+List all API keys. Never includes the raw key or its hash.
+
+**Authentication:** `Authorization: Bearer <ADMIN_ROTATE_TOKEN>`
+
+**Response:**
+
+```json
+{
+  "keys": [
+    { "id": 1, "label": "ci-bot", "createdAt": "2026-05-30T12:00:00.000Z", "revokedAt": null, "lastUsedAt": "2026-05-30T12:05:00.000Z" }
+  ]
+}
+```
+
+### `POST /admin/keys/:id/revoke`
+
+Revoke a key by id. Revoked keys are rejected immediately on their next request.
+
+**Authentication:** `Authorization: Bearer <ADMIN_ROTATE_TOKEN>`
+
+**Response:** `{ "success": true, "id": 1 }`, or `404` if the id doesn't exist or is already revoked.
+
+### Using an API key
+
+Send the raw key on the `X-API-Key` request header on any `/api/v1/*` call. Every response (success, 401, or 429) includes:
+
+| Header | Meaning |
+| ------ | ------- |
+| `X-RateLimit-Limit` | Max requests allowed per window for this key (`API_KEY_RATE_LIMIT_MAX`) |
+| `X-RateLimit-Remaining` | Requests remaining in the current sliding window |
+| `X-RateLimit-Reset` | Unix seconds when the oldest counted request falls out of the window |
+
+An unknown or revoked key returns `401 invalid_api_key`. Exceeding the limit returns `429 too_many_requests` (still with the three headers above, `X-RateLimit-Remaining: 0`). Requests with no `X-API-Key` header are unaffected — they continue to be limited only by the per-IP limiters.
+
+The limiter uses a true sliding window (a per-key timestamp log, not a fixed-window approximation): the oldest entries are dropped as the window moves rather than the count resetting all at once at a fixed boundary.
+
+**Configuration:**
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `API_KEY_RATE_LIMIT_WINDOW_MS` | `60000` (1 minute) | Sliding window size |
+| `API_KEY_RATE_LIMIT_MAX` | `60` | Max requests per key per window |

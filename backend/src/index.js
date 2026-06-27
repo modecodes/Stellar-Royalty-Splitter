@@ -26,6 +26,13 @@ import { metricsRouter } from "./routes/metrics.js";
 import { initializeSigningKey } from "./signing-key.js";
 import { sendError } from "./error-response.js";
 import { verifyRequestSignatureMiddleware } from "./request-signing.js";
+import { apiKeyRateLimiter } from "./api-key-rate-limit.js";
+import { createLegacyApiRedirectMiddleware } from "./legacy-api-redirect.js";
+
+// #399: Cache and event listener imports
+import { getCacheManager } from "./cache.js";
+import { AdminEventListener } from "./events/adminEventListener.js";
+import { getConfiguredContractId } from "./stellar.js";
 
 // Initialize database on startup
 initializeDatabase();
@@ -66,6 +73,11 @@ app.use((req, res, next) => {
   next();
 });
 
+// Guard raw legacy /api request targets before any route can see them so
+// traversal attempts like /api/%2e%2e/admin are rejected instead of
+// normalizing into a different protected path.
+app.use(createLegacyApiRedirectMiddleware({ logger }));
+
 // Security headers
 app.use(helmet());
 
@@ -89,7 +101,9 @@ app.use(
       "X-Timestamp",
       "X-Nonce",
       "X-Signature",
+      "X-API-Key",
     ],
+    exposedHeaders: ["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
     maxAge: Number.isNaN(corsPreflightMaxAge) ? 86400 : corsPreflightMaxAge,
   })
 );
@@ -100,7 +114,8 @@ const generalLimiter = rateLimit({
   max: parseInt(process.env.RATE_LIMIT_MAX ?? "100"),
   standardHeaders: true,
   legacyHeaders: false,
-  handler: (_req, res) => sendError(res, 429, "too_many_requests", "Too many requests, please try again later."),
+  handler: (_req, res) =>
+    sendError(res, 429, "too_many_requests", "Too many requests, please try again later."),
   skip: (req) => req.path === "/api/v1/health" || req.path === "/api/health",
 });
 
@@ -110,7 +125,8 @@ const writeLimiter = rateLimit({
   max: parseInt(process.env.RATE_LIMIT_WRITE_MAX ?? "10"),
   standardHeaders: true,
   legacyHeaders: false,
-  handler: (_req, res) => sendError(res, 429, "too_many_requests", "Too many write requests, please slow down."),
+  handler: (_req, res) =>
+    sendError(res, 429, "too_many_requests", "Too many write requests, please slow down."),
 });
 
 // Read limiter for history/analytics: 30 req / 1 min per IP (issue #394)
@@ -120,10 +136,20 @@ const readAnalyticsLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   handler: (_req, res) =>
-    sendError(res, 429, "too_many_requests", "Too many analytics/history requests, please slow down."),
+    sendError(
+      res,
+      429,
+      "too_many_requests",
+      "Too many analytics/history requests, please slow down."
+    ),
 });
 
 app.use(generalLimiter);
+
+// Per-API-key sliding window rate limiting (#420) — independent of the
+// per-IP limiters above. No-op when X-API-Key is absent.
+app.use(apiKeyRateLimiter);
+
 app.use(express.json({ limit: "10kb" }));
 
 // Ed25519 request signature verification for write operations (#392)
@@ -186,15 +212,11 @@ const adminLimiter = rateLimit({
   max: parseInt(process.env.RATE_LIMIT_ADMIN_MAX ?? "5"),
   standardHeaders: true,
   legacyHeaders: false,
-  handler: (_req, res) => sendError(res, 429, "too_many_requests", "Too many admin requests, please slow down."),
+  handler: (_req, res) =>
+    sendError(res, 429, "too_many_requests", "Too many admin requests, please slow down."),
 });
 app.use("/admin", adminLimiter);
 app.use("/admin", adminRouter);
-
-// Legacy /api/* redirect to /api/v1/*
-app.use("/api", (req, res) => {
-  res.redirect(308, `/api/v1${req.url}`);
-});
 
 // Central error handler
 app.use((err, req, res, _next) => {
@@ -228,11 +250,45 @@ const server = app.listen(PORT, () => logger.info(`API listening on http://local
 server.keepAliveTimeout = parseInt(process.env.KEEP_ALIVE_TIMEOUT_MS ?? "35000");
 server.headersTimeout = parseInt(process.env.HEADERS_TIMEOUT_MS ?? "40000");
 
-const handleShutdown = createGracefulShutdownHandler({
+// #399: Initialize cache manager and admin event listener
+const contractId = getConfiguredContractId();
+let adminEventListener = null;
+
+if (contractId) {
+  try {
+    const cache = getCacheManager();
+    logger.info("[Startup] Cache manager initialized");
+
+    // Start event listener for admin transfer events
+    const { getSorobanRpcClient } = await import("./stellar.js");
+    const sorobanRpc = getSorobanRpcClient();
+    adminEventListener = new AdminEventListener(sorobanRpc, contractId);
+    adminEventListener.start();
+    logger.info("[Startup] Admin event listener started", { contractId });
+  } catch (err) {
+    logger.error("[Startup] Failed to initialize cache/event listener", {
+      error: err.message,
+      contractId,
+    });
+  }
+}
+
+// Graceful shutdown — include event listener and cache cleanup
+const originalShutdown = createGracefulShutdownHandler({
   server,
   closeDatabase,
   logger,
 });
+
+const handleShutdown = (signal) => {
+  logger.info(`[Shutdown] ${signal} received, cleaning up...`);
+  if (adminEventListener) {
+    adminEventListener.stop();
+  }
+  const cache = getCacheManager();
+  cache.disconnect().catch(() => {});
+  originalShutdown(signal);
+};
 
 process.once("SIGTERM", () => handleShutdown("SIGTERM"));
 process.once("SIGINT", () => handleShutdown("SIGINT"));
