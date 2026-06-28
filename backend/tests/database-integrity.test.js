@@ -3,7 +3,7 @@
  * Tests for audit log hash chain integrity verification
  */
 
-import { describe, it, beforeEach, afterEach } from "node:test";
+import { describe, it, beforeEach, afterEach } from "@jest/globals";
 import assert from "node:assert";
 import { db, initializeDatabase, verifyAuditLogIntegrity, computeAuditEntryHash } from "../src/database/core.js";
 import { addAuditLog, getAuditLog } from "../src/database/audit.js";
