@@ -7,6 +7,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import logger from "./logger.js";
 import { correlationMiddleware } from "./correlation.js";
+import { auditExportRouter } from "./routes/audit-export.js";
 import { recordHttpRequest } from "./metrics.js";
 import { resolveCorsOrigin } from "./cors-config.js";
 import { initializeRouter } from "./routes/initialize.js";
@@ -103,7 +104,13 @@ app.use(
       "X-Signature",
       "X-API-Key",
     ],
-    exposedHeaders: ["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+    exposedHeaders: [
+      "X-RateLimit-Limit",
+      "X-RateLimit-Remaining",
+      "X-RateLimit-Reset",
+      "X-Export-Signature",
+      "X-Export-Public-Key",
+    ],
     maxAge: Number.isNaN(corsPreflightMaxAge) ? 86400 : corsPreflightMaxAge,
   })
 );
@@ -203,6 +210,7 @@ app.use("/api/v1", webhooksRouter);
 app.use("/api/v1", analyticsRouter);
 app.use("/api/v1/contract", contractRouter);
 app.use("/api/v1/health", healthRouter);
+app.use("/api/v1/admin", auditExportRouter);
 app.use("/metrics", metricsRouter);
 app.use("/api/v1/metrics", metricsRouter);
 

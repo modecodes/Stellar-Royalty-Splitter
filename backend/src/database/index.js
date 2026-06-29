@@ -41,7 +41,7 @@ export {
 } from "./webhooks.js";
 
 // Audit logging
-export { getAuditLog, addAuditLog } from "./audit.js";
+export { getAuditLog, addAuditLog, exportAuditLogs } from "./audit.js";
 
 // Collaborator lookup
 export { lookupCollaborators } from "./collaborator-lookup.js";
